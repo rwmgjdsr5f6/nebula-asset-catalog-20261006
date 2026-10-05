@@ -1,9 +1,73 @@
-# query 标签查询回归测试运行说明
+# 回归测试运行说明
 
-本组测试为 `query`（按标签精确查询）补充可独立执行的回归测试，仅依赖 Python 3 标准库，
-无需安装任何第三方包，也无需联网。
+本仓库的回归测试仅依赖 Python 3 标准库，无需安装任何第三方包，也无需联网。
+现有两组可独立执行的测试：
 
-## 运行入口
+- `tests/test_query_regression.py`：`query`（按标签精确查询）回归测试；
+- `tests/test_add_dedup_regression.py`：`add` 同一规范路径拒绝重复登记的回归测试。
+
+两组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
+每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+结束后自动清理，不接触、不修改已有目录或素材；
+通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+## add 路径去重回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_add_dedup_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_add_dedup_regression.py
+```
+
+### 覆盖内容
+
+1. 以**相对路径**首次登记样例 A（类型 `image`，标签依次为 `demo`、`ui`）：
+   退出码 0、标准错误为空，标准输出为单个 JSON 对象，
+   含规范绝对路径、原类型与完整标签顺序 `["demo", "ui"]`。
+2. 分别用以下等价写法再次登记 A（每次均传不同类型 `audio` 与标签 `replacement`）：
+   首次登记的相对路径写法、同一文件的绝对路径、含 `.` 的等价路径、
+   含 `..` 的等价路径、同时含 `.` 与 `..` 的等价路径。
+   每次均为：退出码 2、标准输出为空、标准错误说明重复登记（含冲突的规范路径）
+   且不含调用栈。
+3. 每次重复尝试失败后重新查询：`demo` 只返回 A 的原始记录（类型与标签未被
+   覆盖、合并或更新），`replacement` 返回 `[]`；查询退出码均为 0、标准错误为空。
+4. 对照样例 B 与 A **内容相同但规范路径不同**：以 `image` 和相同的两个标签登记成功，
+   查询 `demo` 按首次登记顺序各返回 A、B 一次——去重依据是路径而非文件内容。
+5. 登记与查询分别由独立进程完成；全部登记结束后由**新启动的查询进程**读取
+   同一数据库，结果不变。
+6. 全部操作结束后，A、B 两个样例文件的内容与登记前一致。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_add_success_reports_canonical_record ... ok
+test_duplicate_spellings_rejected_and_original_record_kept ... ok
+test_records_persist_across_processes ... ok
+test_same_content_different_path_registered_separately ... ok
+test_sample_files_unchanged_after_all_operations ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一断言失败时 unittest 以非零退出码退出，
+并打印预期值与实际值的差异（含失败的路径写法说明）。
+
+## query 标签查询回归测试（原有）
+
+### 运行入口
 
 在项目根目录（`asset_catalog/` 所在目录）执行：
 
@@ -17,7 +81,7 @@ python -m unittest tests.test_query_regression -v
 python tests/test_query_regression.py
 ```
 
-## 测试方式
+### 测试方式
 
 - 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
   （`add` 仅用于准备样例数据，测试对象为 `query`）。
@@ -38,7 +102,7 @@ python tests/test_query_regression.py
 4. 缺少 `--tag`、标签仅含空白时：退出码 2、标准输出为空、
    标准错误说明原因且不含调用栈；错误后再次查询 `demo`，原有结果不变。
 
-## 成功结果
+### 成功结果
 
 成功时输出 `OK`，例如：
 
