@@ -6,7 +6,8 @@
 - `tests/test_query_regression.py`：`query`（按标签精确查询）回归测试；
 - `tests/test_add_dedup_regression.py`：`add` 同一规范路径拒绝重复登记的回归测试；
 - `tests/test_add_reject_db_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试；
-- `tests/test_add_db_as_asset_regression.py`：`add` 拒绝把目录数据库自身登记为素材的回归测试。
+- `tests/test_add_db_as_asset_regression.py`：`add` 拒绝把目录数据库自身登记为素材的回归测试；
+- `tests/test_query_multi_tag_regression.py`：`query` 多标签（重复 `--tag`）交集查询的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -239,3 +240,65 @@ OK
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
 并指出失败场景。
+
+## query 多标签交集查询回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest discover -s tests -p test_query_multi_tag_regression.py -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_query_multi_tag_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，测试对象为 `query` 的多标签交集语义）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定样例按 A、B、C 顺序登记：A 类型 `image`，标签依次为 `demo`、`ui`、`Demo`；
+B 类型 `audio`，只有 `demo`；C 类型 `audio`，标签依次为 `ui`、`demo`。
+
+1. 查询 `--tag demo --tag ui` 只返回同时具备两标签的 A、C，各出现一次且保持
+   登记顺序，只带 `demo` 的 B 不入选；每条结果保留登记时的规范绝对路径、
+   类型与完整标签（A 的 `Demo` 标签保留，C 的标签顺序 `["ui", "demo"]`
+   不被查询条件改变）。
+2. 交换两个条件的顺序、重复传入 `demo`、给任一条件增加首尾空白，
+   结果都与原查询相同。
+3. 查询 `Demo` 与 `ui` 只返回 A（大小写区分）；查询 `de` 与 `ui`、
+   `demo` 与未登记标签 `absent` 均返回 `[]`（完整匹配、交集语义）。
+4. 以上成功查询退出码均为 0，标准错误为空，标准输出仅为一个 JSON 数组。
+5. 在有效 `demo` 条件之后追加空字符串标签或仅含空白的标签：整次查询
+   退出码 2、标准输出为空、标准错误指出 `--tag` 的问题且不含调用栈，
+   不返回前面有效条件的结果；每次失败后重新查询 `demo` 与 `ui`
+   仍得到原有 A、C，样例文件内容保持不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_blank_tag_conditions_rejected_and_state_intact ... ok
+test_case_sensitive_exact_match_and_absent_tag ... ok
+test_condition_order_duplicates_and_whitespace_equivalent ... ok
+test_multi_tag_intersection_returns_a_and_c ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并打印对应场景的预期值与实际值差异。
