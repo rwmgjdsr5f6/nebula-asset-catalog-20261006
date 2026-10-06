@@ -1,17 +1,18 @@
 # 回归测试运行说明
 
 本仓库的回归测试仅依赖 Python 3 标准库，无需安装任何第三方包，也无需联网。
-现有两组可独立执行的测试：
+现有三组可独立执行的测试：
 
 - `tests/test_query_regression.py`：`query`（按标签精确查询）回归测试；
-- `tests/test_add_dedup_regression.py`：`add` 同一规范路径拒绝重复登记的回归测试。
+- `tests/test_add_dedup_regression.py`：`add` 同一规范路径拒绝重复登记的回归测试；
+- `tests/test_add_database_protection_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试。
 
-两组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
+三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
 结束后自动清理，不接触、不修改已有目录或素材；
 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
 
-## add 路径去重回归测试（新增）
+## add 路径去重回归测试（原有）
 
 ### 运行入口
 
@@ -64,6 +65,63 @@ OK
 
 重复执行结论一致；任一断言失败时 unittest 以非零退出码退出，
 并打印预期值与实际值的差异（含失败的路径写法说明）。
+
+## add 数据库保护回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_add_database_protection_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_add_database_protection_regression.py
+```
+
+### 覆盖内容
+
+每个用例在独立临时目录中自建样例素材与数据库；每次登记均提供存在的
+普通文件、非空类型与有效标签（`--type image --tag demo`），
+避免把素材参数错误混入数据库保护检查。
+
+1. 数据库文件内容为固定的非 SQLite 文本：执行一次 `add`，
+   退出码 2、标准输出为空、标准错误为单行、说明数据库原因且不含调用栈
+   （不要求底层 SQLite 错误逐字一致）。
+2. 数据库为含其他业务表（`invoice`）及一条固定记录的 SQLite 文件：
+   同样被拒绝，标准错误说明结构原因；失败后原有业务表与记录仍在，
+   未被补建 `asset` / `asset_tag` 表。
+3. 数据库具有 `asset` 与 `asset_tag` 表但 `asset` 缺少 `type` 列：
+   同样被拒绝，标准错误说明结构原因。
+4. 上述每种场景：失败前后数据库文件的**字节内容完全一致**，
+   样例素材内容不变——已有文件不被覆盖、补表或重建。
+5. 对照样例（正常目录）：先登记素材 A（`image`，标签 `demo`），
+   再向同一数据库登记路径不同、类型为 `audio` 的素材 B（标签 `demo`）。
+   第二次登记退出码 0、标准错误为空，标准输出解析后为 B 的规范路径、
+   类型与完整标签；重新启动 `query` 查询 `demo` 按登记顺序返回 A、B，
+   原记录不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_incompatible_schema_missing_type_column_rejected ... ok
+test_non_sqlite_text_database_rejected ... ok
+test_sqlite_with_foreign_tables_rejected ... ok
+test_valid_database_accepts_second_asset_in_order ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一断言失败时 unittest 以非零退出码退出，
+并打印失败场景说明及预期值与实际值的差异。
 
 ## query 标签查询回归测试（原有）
 
