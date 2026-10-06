@@ -56,7 +56,14 @@ def build_parser():
         "--tag",
         action="append",
         required=True,
-        help="要精确匹配的标签（必填，可重复传入；素材需同时具备全部标签）",
+        help="要精确匹配的标签（必填，可重复传入）",
+    )
+    query_parser.add_argument(
+        "--tag-mode",
+        help=(
+            "多标签命中方式（可选，默认 all）：all 要求素材同时具备全部"
+            "不同标签，any 要求素材具备其中任一标签；只接受小写 all 或 any"
+        ),
     )
     query_parser.add_argument(
         "--type",
@@ -269,9 +276,26 @@ def build_records(conn, rows):
     return [records[asset_id] for asset_id in records]
 
 
+def normalize_tag_mode(raw_mode):
+    """校验 --tag-mode：仅接受未经去空白处理的小写 all 或 any。
+
+    取值为空、含首尾空白或大小写不符都按参数错误拒绝，不做静默纠正；
+    None 表示用户未传该选项，按默认的 all 处理。
+    """
+    if raw_mode is None:
+        return "all"
+    if raw_mode not in ("all", "any"):
+        raise CliError(
+            "--tag-mode 只接受小写的 all 或 any（不能为空或含首尾空白）"
+        )
+    return raw_mode
+
+
 def handle_query(args):
-    # 每个标签分别去除首尾空白并按首次出现顺序去重；素材需同时具备
-    # 全部不同标签才入选。大小写保留，匹配区分大小写且不做子串匹配。
+    # 标签与命中方式都在打开数据库之前校验：参数非法时绝不创建数据库或
+    # 改动已有记录。每个标签分别去除首尾空白并按首次出现顺序去重；
+    # 大小写保留，匹配区分大小写且不做子串匹配。
+    tag_mode = normalize_tag_mode(args.tag_mode)
     tags = normalize_tags(args.tag)
 
     asset_type = None
@@ -283,12 +307,17 @@ def handle_query(args):
     conn = open_database(args.db)
     try:
         type_clause = "AND a.type = ?" if asset_type is not None else ""
-        # 素材在命中标签集合中的不同标签数等于条件标签数时，
-        # 才同时具备全部标签；每个素材只入选一次。
         params = [*tags]
         if asset_type is not None:
             params.append(asset_type)
-        params.append(len(tags))
+        if tag_mode == "all":
+            # 素材在命中标签集合中的不同标签数等于条件标签数时，
+            # 才同时具备全部标签；每个素材只入选一次。
+            having_clause = "HAVING COUNT(DISTINCT t.tag) = ?"
+            params.append(len(tags))
+        else:
+            # any：命中任一条件标签即入选，GROUP BY 保证每个素材只一次。
+            having_clause = ""
         rows = conn.execute(
             f"""
             SELECT a.id, a.path, a.type
@@ -297,7 +326,7 @@ def handle_query(args):
             WHERE t.tag IN ({",".join("?" for _ in tags)})
             {type_clause}
             GROUP BY a.id
-            HAVING COUNT(DISTINCT t.tag) = ?
+            {having_clause}
             ORDER BY a.id ASC
             """,
             params,

@@ -8,6 +8,7 @@
 - `tests/test_add_reject_db_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试；
 - `tests/test_add_db_as_asset_regression.py`：`add` 拒绝把目录数据库自身登记为素材的回归测试；
 - `tests/test_query_multi_tag_regression.py`：`query` 多标签（重复 `--tag`）交集查询的回归测试。
+- `tests/test_query_tag_mode_regression.py`：`query --tag-mode`（all 交集 / any 并集）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
@@ -375,3 +376,76 @@ OK
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
 并指出对应场景。
+
+## query --tag-mode 命中方式回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_query_tag_mode_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_query_tag_mode_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，测试对象为 `query --tag-mode`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A、B、C 顺序登记：A 类型 `image`，标签依次为 `demo`、`ui`；
+B 类型 `audio`，只有 `demo`；C 类型 `image`，只有 `ui`。
+
+1. 不传 `--tag-mode` 或显式传 `all`：查询 `demo`、`ui` 只返回 A（交集语义不变）。
+2. `--tag-mode any`：同一查询按登记顺序返回 A、B、C，命中两个条件的 A 只
+   出现一次；记录仅含 `path`、`type`、`tags`，保留规范绝对路径、登记类型与
+   完整标签顺序，不含命中方式或内部编号字段。
+3. any 加 `--type image` 返回 A、C；类型去空白后匹配结论一致；
+   `audio` 只返回 B，无匹配类型输出 `[]`。
+4. any 下交换条件顺序、重复条件、给条件加首尾空白，结果都相同；单个标签时
+   any 与默认方式一致；有效标签与未登记标签混用仍按任一命中，全部未登记返回 `[]`。
+5. 大小写区分（`Demo`、`UI` 不命中）、完整匹配（`de`、`u` 不命中）。
+6. 删除 B 的源文件后 any 仍按登记标签返回 B；不传 `--check-files` 时记录不含
+   `file_status`；传入时只为最终入选记录追加状态（`present`/`missing`），
+   未入选素材（其源文件已缺失）不影响查询；空目录与无匹配均返回 `[]`。
+7. `--tag-mode` 缺少值、为空、含首尾空白、大小写不符或不是 `all`、`any` 时：
+   退出码 2、标准输出为空、标准错误指出 `--tag-mode` 问题且不含调用栈；
+   数据库文件不存在时不被创建；失败后默认与 any 查询结果均不变。
+8. any 下任一 `--tag` 为空或仅含空白时同样退出码 2、标准输出为空，
+   错误指向 `--tag`，不返回其他有效标签的部分结果；样例文件内容不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_any_case_sensitive_and_exact_match ... ok
+test_any_check_files_only_for_selected_records ... ok
+test_any_duplicates_order_and_whitespace_equivalent ... ok
+test_any_empty_catalog_and_no_match_return_empty_array ... ok
+test_any_returns_assets_matching_either_tag ... ok
+test_any_single_tag_and_mixed_absent_tag ... ok
+test_any_with_type_returns_a_and_c ... ok
+test_blank_tag_rejected_even_under_any_mode ... ok
+test_default_and_all_require_every_tag ... ok
+test_invalid_tag_mode_after_registration_leaves_state_intact ... ok
+test_invalid_tag_mode_rejected_without_creating_database ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并打印对应场景的预期值与实际值差异。
