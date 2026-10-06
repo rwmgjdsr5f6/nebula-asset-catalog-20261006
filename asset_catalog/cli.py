@@ -1,4 +1,4 @@
-"""命令行入口：素材登记（add）与按标签查询（query）。
+"""命令行入口：素材登记（add）、按标签查询（query）与完整目录导出（export）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -68,6 +68,11 @@ def build_parser():
         help="为每条结果追加 file_status 字段，报告登记路径当前的文件状态",
     )
     query_parser.set_defaults(handler=handle_query)
+
+    export_parser = subparsers.add_parser(
+        "export", help="导出完整目录中全部素材的登记元数据"
+    )
+    export_parser.set_defaults(handler=handle_export)
 
     return parser
 
@@ -295,6 +300,50 @@ def handle_query(args):
         # 先完成全部状态检查再输出：任一失败则整次命令报错，不输出部分结果。
         for record in result:
             record["file_status"] = check_file_status(record["path"])
+    print(json.dumps(result, ensure_ascii=False))
+    return EXIT_OK
+
+
+def handle_export(args):
+    # 直接反映目录中的登记记录：不读取素材内容，也不检查登记路径当前的
+    # 文件状态，因此源文件已删除或变为目录都不会漏掉素材。
+    conn = open_database(args.db)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, path, type FROM asset
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+        records = {
+            asset_id: {"path": path, "type": asset_type, "tags": []}
+            for asset_id, path, asset_type in rows
+        }
+
+        # 完整标签集按登记时的 position 排序，保留每个素材的标签顺序。
+        if records:
+            asset_ids = list(records)
+            all_tags = conn.execute(
+                f"""
+                SELECT asset_id, tag FROM asset_tag
+                WHERE asset_id IN ({",".join("?" for _ in asset_ids)})
+                ORDER BY asset_id ASC, position ASC
+                """,
+                asset_ids,
+            ).fetchall()
+            tags_by_asset = {}
+            for asset_id, tag_name in all_tags:
+                tags_by_asset.setdefault(asset_id, []).append(tag_name)
+            for asset_id in asset_ids:
+                records[asset_id]["tags"] = tags_by_asset.get(asset_id, [])
+    except sqlite3.Error as exc:
+        raise CliError(f"数据库读取失败: {exc}")
+    finally:
+        conn.close()
+
+    # 按首次登记顺序（id 升序）每条素材输出一次；空目录输出 []。
+    result = [records[asset_id] for asset_id in records]
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 
