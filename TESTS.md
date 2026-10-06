@@ -1,12 +1,13 @@
 # 回归测试运行说明
 
 本仓库的回归测试仅依赖 Python 3 标准库，无需安装任何第三方包，也无需联网。
-现有两组可独立执行的测试：
+现有三组可独立执行的测试：
 
 - `tests/test_query_regression.py`：`query`（按标签精确查询）回归测试；
-- `tests/test_add_dedup_regression.py`：`add` 同一规范路径拒绝重复登记的回归测试。
+- `tests/test_add_dedup_regression.py`：`add` 同一规范路径拒绝重复登记的回归测试；
+- `tests/test_add_reject_db_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试。
 
-两组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
+三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
 结束后自动清理，不接触、不修改已有目录或素材；
 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
@@ -119,3 +120,61 @@ OK
 ```
 
 重复执行结论一致；任一断言失败时 unittest 以非零退出码退出并打印差异。
+
+## add 拒绝损坏或不兼容数据库回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_add_reject_db_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_add_reject_db_regression.py
+```
+
+### 覆盖内容
+
+每次登记都提供存在的普通文件、非空类型与有效标签，
+避免把素材参数错误混入数据库保护检查。拒绝场景：
+
+1. 数据库文件内容为固定的非 SQLite 文本：执行一次 `add` 后退出码 2、
+   标准输出为空、标准错误说明数据库原因且不含调用栈
+   （不要求底层 SQLite 错误逐字一致）。
+2. 数据库文件是含其他业务表及一条固定记录的 SQLite 文件：同样被拒绝；
+   失败后该业务表与固定记录仍在，既不被覆盖也不被补表或重建。
+3. 数据库文件具有 `asset` 与 `asset_tag` 表但 `asset` 缺少 `type` 列：
+   同样被拒绝。
+4. 以上每种场景失败前后，数据库文件的字节内容完全一致，
+   待登记的样例素材内容也不变。
+5. 对照样例：正常数据库先登记类型 `image` 的素材 A，再向同一数据库登记
+   路径不同、类型 `audio` 的素材 B（两者标签均为 `demo`）。第二次登记
+   退出码 0、标准错误为空，标准输出解析后为 B 的规范路径、类型与完整标签；
+   随后由**新启动的 query 进程**查询 `demo`，按登记顺序返回 A、B，
+   原记录不变。
+
+全部样例与数据库由测试在临时目录中独立创建并清理，不访问已有素材，
+不依赖网络、第三方包或平台权限设置。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_control_valid_database_registers_two_assets ... ok
+test_rejects_non_sqlite_database_file ... ok
+test_rejects_schema_missing_type_column ... ok
+test_rejects_sqlite_with_foreign_business_table ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出失败场景。
