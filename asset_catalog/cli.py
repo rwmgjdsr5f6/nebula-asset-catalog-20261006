@@ -8,6 +8,7 @@ import argparse
 import json
 import os
 import sqlite3
+import stat
 import sys
 
 EXIT_OK = 0
@@ -55,6 +56,11 @@ def build_parser():
     query_parser.add_argument(
         "--type",
         help="可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写）",
+    )
+    query_parser.add_argument(
+        "--check-files",
+        action="store_true",
+        help="为每条结果追加 file_status 字段，报告登记路径当前的文件状态",
     )
     query_parser.set_defaults(handler=handle_query)
 
@@ -193,6 +199,25 @@ def handle_add(args):
     return EXIT_OK
 
 
+def check_file_status(path):
+    """返回登记路径当前的文件状态：present / missing / not_file。
+
+    只读取文件状态，不读取文件内容。符号链接按其指向的对象判断，
+    断开的链接归为 missing。权限不足或其他系统错误抛出 CliError，
+    由上层保证整次命令失败且不输出部分结果。
+    """
+    try:
+        st = os.stat(path)
+    except (FileNotFoundError, NotADirectoryError):
+        # 路径本身或中间目录不存在（含断开的符号链接）。
+        return "missing"
+    except OSError as exc:
+        raise CliError(f"无法确定文件状态: {path}: {exc.strerror or exc}")
+    if stat.S_ISREG(st.st_mode):
+        return "present"
+    return "not_file"
+
+
 def handle_query(args):
     tag = args.tag.strip()
     if not tag:
@@ -257,6 +282,10 @@ def handle_query(args):
         conn.close()
 
     result = [records[asset_id] for asset_id in asset_ids]
+    if args.check_files:
+        # 先完成全部状态检查再输出：任一失败则整次命令报错，不输出部分结果。
+        for record in result:
+            record["file_status"] = check_file_status(record["path"])
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 
