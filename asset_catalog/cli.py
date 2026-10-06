@@ -1,4 +1,4 @@
-"""命令行入口：素材登记（add）与按标签查询（query）。
+"""命令行入口：素材登记（add）、按标签查询（query）与完整目录导出（export）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -68,6 +68,11 @@ def build_parser():
         help="为每条结果追加 file_status 字段，报告登记路径当前的文件状态",
     )
     query_parser.set_defaults(handler=handle_query)
+
+    export_parser = subparsers.add_parser(
+        "export", help="导出完整目录中全部已登记素材的元数据"
+    )
+    export_parser.set_defaults(handler=handle_export)
 
     return parser
 
@@ -230,6 +235,35 @@ def check_file_status(path):
     return "not_file"
 
 
+def load_records(conn, rows):
+    """按给定的 (id, path, type) 行顺序装配完整记录。
+
+    标签取每个素材的完整标签集并保持登记时的顺序；无标签素材输出空列表。
+    """
+    asset_ids = [row[0] for row in rows]
+    records = {
+        asset_id: {"path": path, "type": asset_type_value, "tags": []}
+        for asset_id, path, asset_type_value in rows
+    }
+
+    if asset_ids:
+        all_tags = conn.execute(
+            f"""
+            SELECT asset_id, tag FROM asset_tag
+            WHERE asset_id IN ({",".join("?" for _ in asset_ids)})
+            ORDER BY asset_id ASC, position ASC
+            """,
+            asset_ids,
+        ).fetchall()
+        tags_by_asset = {}
+        for asset_id, tag_name in all_tags:
+            tags_by_asset.setdefault(asset_id, []).append(tag_name)
+        for asset_id in asset_ids:
+            records[asset_id]["tags"] = tags_by_asset.get(asset_id, [])
+
+    return [records[asset_id] for asset_id in asset_ids]
+
+
 def handle_query(args):
     # 每个标签分别去除首尾空白并按首次出现顺序去重；素材需同时具备
     # 全部不同标签才入选。大小写保留，匹配区分大小写且不做子串匹配。
@@ -264,37 +298,40 @@ def handle_query(args):
             params,
         ).fetchall()
 
-        asset_ids = [row[0] for row in rows]
-        records = {
-            asset_id: {"path": path, "type": asset_type_value, "tags": []}
-            for asset_id, path, asset_type_value in rows
-        }
-
         # 用该素材的完整标签集输出（保持登记时的顺序）。
-        if asset_ids:
-            all_tags = conn.execute(
-                f"""
-                SELECT asset_id, tag FROM asset_tag
-                WHERE asset_id IN ({",".join("?" for _ in asset_ids)})
-                ORDER BY asset_id ASC, position ASC
-                """,
-                asset_ids,
-            ).fetchall()
-            tags_by_asset = {}
-            for asset_id, tag_name in all_tags:
-                tags_by_asset.setdefault(asset_id, []).append(tag_name)
-            for asset_id in asset_ids:
-                records[asset_id]["tags"] = tags_by_asset.get(asset_id, [])
+        result = load_records(conn, rows)
     except sqlite3.Error as exc:
         raise CliError(f"数据库读取失败: {exc}")
     finally:
         conn.close()
 
-    result = [records[asset_id] for asset_id in asset_ids]
     if args.check_files:
         # 先完成全部状态检查再输出：任一失败则整次命令报错，不输出部分结果。
         for record in result:
             record["file_status"] = check_file_status(record["path"])
+    print(json.dumps(result, ensure_ascii=False))
+    return EXIT_OK
+
+
+def handle_export(args):
+    # 导出直接反映数据库中的登记记录：不读取素材内容，也不检查登记路径
+    # 当前的文件状态，因此源文件被删除或原路径变为目录都不会漏掉素材。
+    conn = open_database(args.db)
+    try:
+        rows = conn.execute(
+            """
+            SELECT id, path, type FROM asset
+            ORDER BY id ASC
+            """
+        ).fetchall()
+
+        # 用该素材的完整标签集输出（保持登记时的顺序）。
+        result = load_records(conn, rows)
+    except sqlite3.Error as exc:
+        raise CliError(f"数据库读取失败: {exc}")
+    finally:
+        conn.close()
+
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 

@@ -8,6 +8,7 @@
 - `tests/test_add_reject_db_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试；
 - `tests/test_add_db_as_asset_regression.py`：`add` 拒绝把目录数据库自身登记为素材的回归测试；
 - `tests/test_query_multi_tag_regression.py`：`query` 多标签（重复 `--tag`）交集查询的回归测试。
+- `tests/test_export_regression.py`：`export` 导出完整目录的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -302,3 +303,71 @@ OK
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
 并打印对应场景的预期值与实际值差异。
+
+## export 导出完整目录回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_export_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_export_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，测试对象为 `export`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定演示文件按验收场景登记：A 类型 `image`，标签依次为 `demo`、`ui`；
+B 类型 `audio`，标签只有 `music`。
+
+1. `export` 不需标签参数即按 A、B 顺序返回两条记录；每条仅含 `path`、
+   `type`、`tags`，保留规范绝对路径、类型文本与完整标签顺序，各出现一次。
+2. 删除演示文件 B（保留登记记录）后导出，B 仍在结果中且没有
+   `file_status` 字段；随后 `query --tag demo` 仍只返回 A，证明导出
+   不改变登记内容，源文件 A 也不被改动。
+3. 将 B 的登记路径替换为目录后导出，B 仍被返回——不检查当前文件状态。
+4. 空目录（含数据库文件尚不存在、以及已初始化的空库）输出 `[]`；
+   数据库文件不存在但父目录存在时会创建空目录数据库，父目录缺失时
+   不补建目录且退出码 2。
+5. 缺少 `--db`、数据库路径为空、向 `export` 传入 `--tag`、`--unexpected`
+   等不支持的参数、数据库路径指向目录：退出码 2、标准输出为空、
+   标准错误说明原因且不含调用栈，且不输出部分记录。
+6. 非 SQLite 文件、含其他业务表的 SQLite 文件、表结构缺列的文件：
+   同样被拒绝，且失败前后数据库字节完全一致，不被覆盖、补表或重建。
+7. 手工构造的结构兼容数据库（模拟既有登记）无需重新登记即可直接导出。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_argument_and_path_errors ... ok
+test_assets_registered_by_earlier_version_export_without_re_register ... ok
+test_corrupt_or_incompatible_database_rejected_and_untouched ... ok
+test_deleted_source_kept_and_registrations_unchanged ... ok
+test_empty_catalog_outputs_empty_array ... ok
+test_export_returns_full_catalog_in_registration_order ... ok
+test_missing_parent_directory_is_not_created ... ok
+test_registered_path_replaced_by_directory_still_exported ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出失败场景。
