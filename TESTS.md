@@ -8,6 +8,7 @@
 - `tests/test_add_reject_db_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试；
 - `tests/test_add_db_as_asset_regression.py`：`add` 拒绝把目录数据库自身登记为素材的回归测试；
 - `tests/test_query_multi_tag_regression.py`：`query` 多标签（重复 `--tag`）交集查询的回归测试。
+- `tests/test_query_tag_mode_any_regression.py`：`query --tag-mode any` 任选标签查询（含默认/`all` 交集不变、与 `--type`、`--check-files` 组合及参数错误）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
@@ -303,6 +304,78 @@ OK
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
 并打印对应场景的预期值与实际值差异。
+
+## query 任选标签查询（--tag-mode any）回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest discover -s tests -p test_query_tag_mode_any_regression.py -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_query_tag_mode_any_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，测试对象为 `query` 的 `--tag-mode` 语义）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A、B、C 顺序登记：A 类型 `image`，标签依次为 `demo`、`ui`；
+B 类型 `audio`，只有 `demo`；C 类型 `image`，只有 `ui`。
+
+1. 不传 `--tag-mode` 与显式 `all` 查询 `demo`、`ui` 仍只返回 A（交集语义不变）。
+2. `--tag-mode any` 查询 `demo`、`ui` 按登记顺序返回 A、B、C，命中两个条件的
+   A 只出现一次；每条记录仍只含 `path`、`type`、`tags`，保留规范绝对路径、
+   登记类型与完整标签顺序，无匹配方式或内部编号字段。
+3. `any` 加 `--type image` 返回 A、C（既要命中任一标签也要匹配类型）；
+   类型不匹配时输出 `[]`。
+4. `any` 下交换条件顺序、重复传入标签、给条件增加首尾空白，结果都相同。
+5. `any` 仍区分大小写并完整匹配：`Demo`、`de` 与未登记标签均不产生误命中。
+6. 删除源文件 C 后 `any` 仍按登记标签入选；不传 `--check-files` 时不检查
+   文件状态，传入时只为入选记录追加 `present` / `missing` / `not_file`。
+7. 空目录或无匹配返回 `[]`。
+8. `--tag-mode` 缺少值、为空、含首尾空白、大小写不符或不是 `all`、`any`：
+   退出码 2、标准输出为空、标准错误指出该选项且不含调用栈，参数错误不创建
+   数据库、不改变已有记录。
+9. `any` 下任一 `--tag` 为空或只有空白（即使其他标签有效）：整次查询退出码 2、
+   标准输出为空、标准错误指向 `--tag` 且不含调用栈；失败后重新查询结果不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_any_combined_with_type_filter ... ok
+test_any_deleted_source_file_still_selected_and_check_files ... ok
+test_any_duplicates_order_and_whitespace_equivalent ... ok
+test_any_empty_directory_or_no_match_returns_empty_array ... ok
+test_any_returns_assets_having_either_tag_once_each ... ok
+test_any_still_case_sensitive_and_exact ... ok
+test_blank_tag_rejected_even_under_any ... ok
+test_default_and_explicit_all_keep_intersection ... ok
+test_invalid_tag_mode_leaves_existing_records_intact ... ok
+test_invalid_tag_mode_rejected_without_creating_database ... ok
+test_tag_mode_rejected_for_other_subcommands ... ok
+
+----------------------------------------------------------------------
+Ran 11 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出失败场景。
 
 ## export 完整目录导出回归测试（新增）
 

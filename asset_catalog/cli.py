@@ -53,10 +53,19 @@ def build_parser():
 
     query_parser = subparsers.add_parser("query", help="按完整标签查询素材")
     query_parser.add_argument(
+        "--tag-mode",
+        choices=("all", "any"),
+        default="all",
+        help=(
+            "多标签命中方式：all（默认）要求素材同时具备全部不同标签；"
+            "any 只要具备任一标签即入选。只接受小写 all 或 any"
+        ),
+    )
+    query_parser.add_argument(
         "--tag",
         action="append",
         required=True,
-        help="要精确匹配的标签（必填，可重复传入；素材需同时具备全部标签）",
+        help="要精确匹配的标签（必填，可重复传入；命中方式由 --tag-mode 决定）",
     )
     query_parser.add_argument(
         "--type",
@@ -270,9 +279,11 @@ def build_records(conn, rows):
 
 
 def handle_query(args):
-    # 每个标签分别去除首尾空白并按首次出现顺序去重；素材需同时具备
-    # 全部不同标签才入选。大小写保留，匹配区分大小写且不做子串匹配。
+    # 每个标签分别去除首尾空白并按首次出现顺序去重；大小写保留，匹配区分
+    # 大小写且不做子串匹配。tag_mode 为 all（默认）时素材需同时具备全部
+    # 不同标签才入选，为 any 时具备任一标签即入选。
     tags = normalize_tags(args.tag)
+    tag_mode = args.tag_mode
 
     asset_type = None
     if args.type is not None:
@@ -283,12 +294,18 @@ def handle_query(args):
     conn = open_database(args.db)
     try:
         type_clause = "AND a.type = ?" if asset_type is not None else ""
-        # 素材在命中标签集合中的不同标签数等于条件标签数时，
-        # 才同时具备全部标签；每个素材只入选一次。
         params = [*tags]
         if asset_type is not None:
             params.append(asset_type)
-        params.append(len(tags))
+        if tag_mode == "all":
+            # 素材在命中标签集合中的不同标签数等于条件标签数时，
+            # 才同时具备全部标签；每个素材只入选一次。
+            having_clause = "HAVING COUNT(DISTINCT t.tag) = ?"
+            params.append(len(tags))
+        else:
+            # any：行本身即来自命中任一条件标签的素材，分组后每个素材
+            # 只入选一次，重复条件与条件顺序都不影响结果。
+            having_clause = ""
         rows = conn.execute(
             f"""
             SELECT a.id, a.path, a.type
@@ -297,7 +314,7 @@ def handle_query(args):
             WHERE t.tag IN ({",".join("?" for _ in tags)})
             {type_clause}
             GROUP BY a.id
-            HAVING COUNT(DISTINCT t.tag) = ?
+            {having_clause}
             ORDER BY a.id ASC
             """,
             params,
