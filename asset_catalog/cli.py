@@ -52,7 +52,12 @@ def build_parser():
     add_parser.set_defaults(handler=handle_add)
 
     query_parser = subparsers.add_parser("query", help="按完整标签查询素材")
-    query_parser.add_argument("--tag", required=True, help="要精确匹配的标签（必填）")
+    query_parser.add_argument(
+        "--tag",
+        action="append",
+        required=True,
+        help="要精确匹配的标签（必填，可重复传入；素材需同时具备全部标签）",
+    )
     query_parser.add_argument(
         "--type",
         help="可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写）",
@@ -219,9 +224,9 @@ def check_file_status(path):
 
 
 def handle_query(args):
-    tag = args.tag.strip()
-    if not tag:
-        raise CliError("查询标签 --tag 去除首尾空白后不能为空")
+    # 每个标签分别去除首尾空白并按首次出现顺序去重；素材需同时具备
+    # 全部不同标签才入选。大小写保留，匹配区分大小写且不做子串匹配。
+    tags = normalize_tags(args.tag)
 
     asset_type = None
     if args.type is not None:
@@ -231,35 +236,32 @@ def handle_query(args):
 
     conn = open_database(args.db)
     try:
-        if asset_type is None:
-            type_clause = ""
-            params = (tag,)
-        else:
-            type_clause = "AND a.type = ?"
-            params = (tag, asset_type)
+        type_clause = "AND a.type = ?" if asset_type is not None else ""
+        # 素材在命中标签集合中的不同标签数等于条件标签数时，
+        # 才同时具备全部标签；每个素材只入选一次。
+        params = [*tags]
+        if asset_type is not None:
+            params.append(asset_type)
+        params.append(len(tags))
         rows = conn.execute(
             f"""
-            SELECT a.id, a.path, a.type, t.tag
+            SELECT a.id, a.path, a.type
             FROM asset_tag t
             JOIN asset a ON a.id = t.asset_id
-            WHERE t.tag = ?
+            WHERE t.tag IN ({",".join("?" for _ in tags)})
             {type_clause}
-            ORDER BY a.id ASC, t.position ASC
+            GROUP BY a.id
+            HAVING COUNT(DISTINCT t.tag) = ?
+            ORDER BY a.id ASC
             """,
             params,
         ).fetchall()
 
-        asset_ids = []
-        records = {}
-        for asset_id, path, asset_type, matched_tag in rows:
-            if asset_id not in records:
-                asset_ids.append(asset_id)
-                records[asset_id] = {
-                    "path": path,
-                    "type": asset_type,
-                    "tags": [],
-                }
-            records[asset_id]["tags"].append(matched_tag)
+        asset_ids = [row[0] for row in rows]
+        records = {
+            asset_id: {"path": path, "type": asset_type_value, "tags": []}
+            for asset_id, path, asset_type_value in rows
+        }
 
         # 用该素材的完整标签集输出（保持登记时的顺序）。
         if asset_ids:
