@@ -1,4 +1,5 @@
-"""命令行入口：素材登记（add）、按标签查询（query）与完整目录导出（export）。
+"""命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）
+与整组标签替换（retag）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -82,6 +83,20 @@ def build_parser():
         "export", help="导出完整目录中全部素材的登记元数据"
     )
     export_parser.set_defaults(handler=handle_export)
+
+    retag_parser = subparsers.add_parser(
+        "retag", help="用一组新标签完整替换一条已登记素材的旧标签"
+    )
+    retag_parser.add_argument(
+        "path", help="已登记素材的路径（按规范绝对路径匹配登记记录）"
+    )
+    retag_parser.add_argument(
+        "--tag",
+        action="append",
+        required=True,
+        help="新标签，可重复传入且至少一个；完整替换旧标签",
+    )
+    retag_parser.set_defaults(handler=handle_retag)
 
     return parser
 
@@ -354,6 +369,55 @@ def handle_export(args):
 
     # 按首次登记顺序（id 升序）每条素材输出一次；空目录输出 []。
     print(json.dumps(result, ensure_ascii=False))
+    return EXIT_OK
+
+
+def handle_retag(args):
+    # 参数校验全部在打开数据库之前完成：参数错误不创建数据库文件。
+    if not args.path:
+        raise CliError("素材路径不能为空")
+    tags = normalize_tags(args.tag)
+
+    # 与 add 相同的规范绝对路径规则：等价写法定位同一条登记记录。
+    # 不检查源文件当前状态，源文件已删除或变成目录仍可替换标签，
+    # 且本命令从不读取或写入源文件内容。
+    canonical_path = os.path.realpath(args.path)
+
+    conn = open_database(args.db)
+    try:
+        try:
+            row = conn.execute(
+                "SELECT id, type FROM asset WHERE path = ?", (canonical_path,)
+            ).fetchone()
+        except sqlite3.Error as exc:
+            raise CliError(f"数据库读取失败: {exc}")
+        if row is None:
+            raise CliError(f"素材未登记: {canonical_path}")
+        asset_id, asset_type = row
+
+        try:
+            # 同一事务内先删后插：失败时整体回滚，不留下部分新标签，
+            # 也不改变其他素材的记录；路径、类型与登记顺序保持不变。
+            conn.execute(
+                "DELETE FROM asset_tag WHERE asset_id = ?", (asset_id,)
+            )
+            conn.executemany(
+                "INSERT INTO asset_tag(asset_id, tag, position) VALUES (?, ?, ?)",
+                [(asset_id, tag, position) for position, tag in enumerate(tags)],
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            raise CliError(f"数据库写入失败: {exc}")
+    finally:
+        conn.close()
+
+    print(
+        json.dumps(
+            {"path": canonical_path, "type": asset_type, "tags": tags},
+            ensure_ascii=False,
+        )
+    )
     return EXIT_OK
 
 
