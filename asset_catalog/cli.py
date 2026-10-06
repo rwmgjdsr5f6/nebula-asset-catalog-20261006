@@ -235,6 +235,34 @@ def check_file_status(path):
     return "not_file"
 
 
+def assemble_records(conn, rows):
+    """把 (id, path, type) 行整理为输出记录列表。
+
+    每条记录含 path、type、tags；tags 为该素材的完整标签集，按登记时的
+    position 排序。记录按 rows 的顺序（即首次登记顺序）各出现一次。
+    """
+    records = {
+        asset_id: {"path": path, "type": asset_type, "tags": []}
+        for asset_id, path, asset_type in rows
+    }
+    if records:
+        asset_ids = list(records)
+        all_tags = conn.execute(
+            f"""
+            SELECT asset_id, tag FROM asset_tag
+            WHERE asset_id IN ({",".join("?" for _ in asset_ids)})
+            ORDER BY asset_id ASC, position ASC
+            """,
+            asset_ids,
+        ).fetchall()
+        tags_by_asset = {}
+        for asset_id, tag_name in all_tags:
+            tags_by_asset.setdefault(asset_id, []).append(tag_name)
+        for asset_id in asset_ids:
+            records[asset_id]["tags"] = tags_by_asset.get(asset_id, [])
+    return [records[asset_id] for asset_id in records]
+
+
 def handle_query(args):
     # 每个标签分别去除首尾空白并按首次出现顺序去重；素材需同时具备
     # 全部不同标签才入选。大小写保留，匹配区分大小写且不做子串匹配。
@@ -269,33 +297,12 @@ def handle_query(args):
             params,
         ).fetchall()
 
-        asset_ids = [row[0] for row in rows]
-        records = {
-            asset_id: {"path": path, "type": asset_type_value, "tags": []}
-            for asset_id, path, asset_type_value in rows
-        }
-
-        # 用该素材的完整标签集输出（保持登记时的顺序）。
-        if asset_ids:
-            all_tags = conn.execute(
-                f"""
-                SELECT asset_id, tag FROM asset_tag
-                WHERE asset_id IN ({",".join("?" for _ in asset_ids)})
-                ORDER BY asset_id ASC, position ASC
-                """,
-                asset_ids,
-            ).fetchall()
-            tags_by_asset = {}
-            for asset_id, tag_name in all_tags:
-                tags_by_asset.setdefault(asset_id, []).append(tag_name)
-            for asset_id in asset_ids:
-                records[asset_id]["tags"] = tags_by_asset.get(asset_id, [])
+        result = assemble_records(conn, rows)
     except sqlite3.Error as exc:
         raise CliError(f"数据库读取失败: {exc}")
     finally:
         conn.close()
 
-    result = [records[asset_id] for asset_id in asset_ids]
     if args.check_files:
         # 先完成全部状态检查再输出：任一失败则整次命令报错，不输出部分结果。
         for record in result:
@@ -316,34 +323,13 @@ def handle_export(args):
             """
         ).fetchall()
 
-        records = {
-            asset_id: {"path": path, "type": asset_type, "tags": []}
-            for asset_id, path, asset_type in rows
-        }
-
-        # 完整标签集按登记时的 position 排序，保留每个素材的标签顺序。
-        if records:
-            asset_ids = list(records)
-            all_tags = conn.execute(
-                f"""
-                SELECT asset_id, tag FROM asset_tag
-                WHERE asset_id IN ({",".join("?" for _ in asset_ids)})
-                ORDER BY asset_id ASC, position ASC
-                """,
-                asset_ids,
-            ).fetchall()
-            tags_by_asset = {}
-            for asset_id, tag_name in all_tags:
-                tags_by_asset.setdefault(asset_id, []).append(tag_name)
-            for asset_id in asset_ids:
-                records[asset_id]["tags"] = tags_by_asset.get(asset_id, [])
+        # 按首次登记顺序（id 升序）每条素材输出一次；空目录输出 []。
+        result = assemble_records(conn, rows)
     except sqlite3.Error as exc:
         raise CliError(f"数据库读取失败: {exc}")
     finally:
         conn.close()
 
-    # 按首次登记顺序（id 升序）每条素材输出一次；空目录输出 []。
-    result = [records[asset_id] for asset_id in records]
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 
