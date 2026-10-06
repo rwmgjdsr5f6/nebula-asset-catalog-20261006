@@ -1,11 +1,12 @@
 # 回归测试运行说明
 
 本仓库的回归测试仅依赖 Python 3 标准库，无需安装任何第三方包，也无需联网。
-现有三组可独立执行的测试：
+现有以下可独立执行的测试：
 
 - `tests/test_query_regression.py`：`query`（按标签精确查询）回归测试；
 - `tests/test_add_dedup_regression.py`：`add` 同一规范路径拒绝重复登记的回归测试；
-- `tests/test_add_reject_db_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试。
+- `tests/test_add_reject_db_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试；
+- `tests/test_add_db_as_asset_regression.py`：`add` 拒绝把目录数据库自身登记为素材的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -172,6 +173,66 @@ test_rejects_sqlite_with_foreign_business_table ... ok
 
 ----------------------------------------------------------------------
 Ran 4 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出失败场景。
+
+## add 拒绝把目录数据库自身登记为素材回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_add_db_as_asset_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_add_db_as_asset_regression.py
+```
+
+### 覆盖内容
+
+1. 正常登记一个 image 素材（标签依次为 `demo`、`ui`）后，以目录数据库
+   作为素材路径、以 `database` 类型和 `self` 标签发起 `add`：退出码 2、
+   标准输出为空、标准错误说明目录数据库不能作为本次素材登记并包含冲突的
+   规范绝对路径，不含调用栈。
+2. 等价写法均适用：素材侧与数据库侧各自使用相对路径、绝对路径、
+   含 `.` / `..` 的写法，以及（环境支持时）指向数据库的符号链接，
+   结论不变。
+3. 每次拒绝后：数据库文件字节与拒绝前完全一致；`query --tag demo`
+   仍只返回原素材及完整标签，`query --tag self` 返回 `[]`。
+4. 已有空文件与数据库路径相同时同样被拒绝，且不会因此被初始化为
+   目录数据库（文件仍为空）。
+5. 已有非 SQLite 文件或不兼容 SQLite 文件在两条路径相同且其他登记参数
+   有效时，同样报告路径冲突并保持原内容。
+6. 对照样例：路径不同的另一份 SQLite 文件仍能以 `database` 类型和
+   `self` 标签登记到该目录数据库——不按扩展名或内容一概拒绝素材。
+7. 登记路径不存在、不是普通文件、类型或标签去空白后为空、缺少必填
+   参数时，仍沿用原有错误规则（退出码 2、标准输出为空、说明对应原因），
+   不创建数据库文件。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_control_other_sqlite_file_still_registered ... ok
+test_db_as_asset_rejected_and_state_untouched ... ok
+test_empty_file_not_initialized ... ok
+test_equivalent_spellings_on_both_sides_rejected ... ok
+test_incompatible_sqlite_file_same_path_reports_conflict ... ok
+test_non_sqlite_file_same_path_reports_conflict ... ok
+test_original_error_rules_unchanged ... ok
+test_symlink_spellings_rejected ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in ...s
 
 OK
 ```

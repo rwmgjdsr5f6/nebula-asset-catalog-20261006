@@ -168,6 +168,13 @@ def handle_add(args):
 
     tags = normalize_tags(args.tag)
 
+    # 目录数据库不能作为素材登记到自身：两侧路径按同一规则解析为规范
+    # 绝对路径后相同即拒绝。检查在打开数据库之前进行，已有空文件不会
+    # 因此被初始化，非 SQLite 或不兼容 SQLite 文件也保持原内容。
+    canonical_db_path = os.path.realpath(args.db)
+    if canonical_path == canonical_db_path:
+        raise CliError(f"目录数据库不能作为本次素材登记: {canonical_path}")
+
     conn = open_database(args.db)
     try:
         existing = conn.execute(
