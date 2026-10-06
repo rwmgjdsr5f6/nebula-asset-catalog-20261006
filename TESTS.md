@@ -1,9 +1,11 @@
 # 回归测试运行说明
 
 本仓库的回归测试仅依赖 Python 3 标准库，无需安装任何第三方包，也无需联网。
-现有三组可独立执行的测试：
+现有四组可独立执行的测试：
 
 - `tests/test_query_regression.py`：`query`（按标签精确查询）回归测试；
+- `tests/test_query_type_regression.py`：`query --type`（标签结果内类型筛选）回归测试；
+- `tests/test_query_check_files_regression.py`：`query --check-files`（按需文件状态提示）回归测试；
 - `tests/test_add_dedup_regression.py`：`add` 同一规范路径拒绝重复登记的回归测试；
 - `tests/test_add_reject_db_regression.py`：`add` 拒绝损坏或不兼容数据库的回归测试。
 
@@ -120,6 +122,62 @@ OK
 ```
 
 重复执行结论一致；任一断言失败时 unittest 以非零退出码退出并打印差异。
+
+## query --check-files 文件状态提示回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_query_check_files_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_query_check_files_regression.py
+```
+
+### 覆盖内容
+
+1. 固定样例验收：A、B 均以类型 `image`、标签 `demo` 依次登记，保留 A 并删除 B 后，
+   `query --tag demo --type image --check-files` 按 A、B 顺序各返回一次，
+   `file_status` 分别为 `present`、`missing`；随后在 B 的原路径创建目录，
+   再次查询只把 B 变为 `not_file`；去掉 `--check-files` 后两条记录恢复
+   path/type/tags 三字段输出。
+2. `file_status` 仅作为追加字段，不改变筛选范围、首次登记顺序与完整标签顺序；
+   标签或类型无匹配时输出 `[]`，成功时退出码 0、标准错误为空。
+3. 路径事后被替换为符号链接时按指向对象判断：指向普通文件为 `present`、
+   链接断开为 `missing`、指向目录为 `not_file`；输出 `path` 始终保留登记值。
+4. 普通文件内容变化后仍为 `present`；目录与 FIFO 等非普通文件为 `not_file`。
+5. 状态不写入数据库：检查后 `asset` 表结构（id/path/type）与记录均不变，
+   开关出现前创建的数据库同样可用。
+6. 只检查满足标签及可选类型条件的记录：一条标签不匹配、且位于不可进入目录中的
+   记录不会被检查；查询它自身时才因状态无法确定而失败。
+7. 权限不足导致状态无法确定时：退出码 2、标准输出为空、标准错误说明失败路径与原因
+   且不含调用栈，不输出部分结果、不伪装成 `missing`；权限恢复后查询正常
+   （root 用户下该场景自动跳过）。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_content_change_still_present_and_non_files ... ok
+test_fixed_sample_present_then_missing_then_not_file ... ok
+test_no_match_outputs_empty_array ... ok
+test_only_matching_records_are_checked ... ok
+test_permission_error_fails_whole_command_without_partial_output ... ok
+test_status_not_persisted_and_database_compatible ... ok
+test_symlinks_follow_target_and_path_preserved ... ok
+test_without_switch_restores_three_fields ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in ...s
+
+OK
+```
 
 ## add 拒绝损坏或不兼容数据库回归测试（新增）
 

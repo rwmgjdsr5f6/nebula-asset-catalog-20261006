@@ -5,8 +5,10 @@
 """
 
 import argparse
+import errno
 import json
 import os
+import stat
 import sqlite3
 import sys
 
@@ -55,6 +57,14 @@ def build_parser():
     query_parser.add_argument(
         "--type",
         help="可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写）",
+    )
+    query_parser.add_argument(
+        "--check-files",
+        action="store_true",
+        help=(
+            "按需检查匹配记录的路径状态并追加 file_status 字段："
+            "present（普通文件）/ missing（路径不存在或链接断开）/ not_file（目录等非普通文件）"
+        ),
     )
     query_parser.set_defaults(handler=handle_query)
 
@@ -127,6 +137,32 @@ def verify_schema(conn):
     }
     if asset_cols != ASSET_COLUMNS or tag_cols != TAG_COLUMNS:
         raise CliError("数据库表结构与本产品不兼容，拒绝覆盖或重建")
+
+
+def classify_file(path):
+    """按登记路径判定文件状态，不读取素材内容。
+
+    - present：路径当前指向普通文件（符号链接按其指向的对象判断）；
+    - missing：路径或中间目录不存在，或符号链接断开；
+    - not_file：路径存在但是目录或其他非普通文件（如 FIFO、设备文件）。
+
+    权限不足或其他系统错误抛 CliError，由调用方按退出码 2 处理，
+    绝不把无法确定的状态伪装成 missing。
+    """
+    try:
+        # follow_symlinks=True：符号链接按指向的对象判断；
+        # 断开的链接及不存在的路径统一归为 missing。
+        st = os.stat(path)
+    except FileNotFoundError:
+        return "missing"
+    except OSError as exc:
+        if exc.errno == errno.ENOENT:
+            return "missing"
+        raise CliError(f"检查文件状态失败 {path}: {exc.strerror or exc}")
+
+    if stat.S_ISREG(st.st_mode):
+        return "present"
+    return "not_file"
 
 
 def normalize_tags(raw_tags):
@@ -257,6 +293,13 @@ def handle_query(args):
         conn.close()
 
     result = [records[asset_id] for asset_id in asset_ids]
+
+    if getattr(args, "check_files", False):
+        # 仅检查满足标签及可选类型条件的匹配记录；任一状态无法确定即整体失败，
+        # 不输出部分结果。状态只随本次输出返回，不写入数据库。
+        for record in result:
+            record["file_status"] = classify_file(record["path"])
+
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 
