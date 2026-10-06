@@ -11,6 +11,7 @@
 - `tests/test_query_tag_mode_any_regression.py`：`query --tag-mode any` 任选标签查询（含默认/`all` 交集不变、与 `--type`、`--check-files` 组合及参数错误）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
+- `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍完整回滚、不留部分新标签；撤去条件后重试成功）。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -524,3 +525,78 @@ OK
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
 并指出对应场景。
+
+## retag 写入中途失败的原子性专项回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest discover -s tests -p test_retag_atomicity.py -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_retag_atomicity.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`query`/`export` 用于核对替换结果，测试对象为 `retag`）。
+- 每个用例使用 `tempfile` 创建**两个临时演示文件与独立 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络、外部素材、
+  第三方库或平台权限差异。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+- 失败注入**只新增一个 SQLite 触发器作为固定条件**，不修改 `asset` /
+  `asset_tag` 的现有兼容表结构与既有数据，安装后样例库的 `query` /
+  `export` 等正常读取功能保持可用。
+
+### 覆盖内容（固定场景）
+
+样例只包含两个临时演示文件，按 A、B 顺序经 `add` 登记：
+A 类型 `image`，标签依次为 `demo`、`ui`；B 类型 `audio`，标签只有 `demo`。
+
+1. **准备与条件有效性**：在保持现有兼容表结构的前提下，向样例库安装
+   「仅拒绝 `blocked` 标签写入、允许 `project` 等其他标签写入」的固定条件
+   （`BEFORE INSERT` 触发器）。安装后新进程 `export` 仍正常读取出 A、B
+   原记录；直接在独立回滚事务中探测确认 `project` 可写、`blocked` 被拒，
+   且探测不留数据——保证随后失败只可能来自替换流程中第二个新标签的写入，
+   参数与数据库读写本身均有效。
+2. **写入中途失败**：执行 `retag A.bin --tag project --tag blocked`——
+   旧标签删除与第一个新标签 `project` 已进入同一替换事务，第二个新标签
+   `blocked` 触发条件失败。预期：**退出码 2、标准输出为空**；标准错误为
+   **单行**说明「数据库读写失败」且点出 `blocked`，**不含调用栈**。
+3. **失败后原子性核对（新进程公开入口）**：
+   - `export` 中 A 的完整旧标签及顺序仍为 `["demo", "ui"]`，B 的记录与
+     A、B 的登记顺序均不变；
+   - `query --tag project` 与 `query --tag blocked` 均返回 `[]`
+     （不留下已进入流程的第一个新标签，也不留下被拒标签）；
+   - `query --tag demo` 仍按原顺序返回 A、B；
+   - 两个素材文件内容与准备时完全一致。
+4. **撤去条件后重试成功**：在同一测试场景中删除触发器撤去拒绝条件，
+   再次提交**完全相同**的替换命令：退出码 0、标准错误为空，标准输出为
+   既有格式的 A 记录（仅含 `path`、`type`、`tags`），标签为
+   `["project", "blocked"]`，路径与类型不变。
+5. **成功后持久化核对（新进程）**：`export` 仍得到 A、B，只有 A 的标签
+   改变；`query project` / `blocked` 只返回 A 的新记录，`query demo` 只
+   返回标签未变的 B；两个素材文件内容仍保持不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_mid_write_failure_is_atomic_and_retry_succeeds_after_condition_removed ... ok
+
+----------------------------------------------------------------------
+Ran 1 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一上述行为不符时 unittest 以非零退出码退出，
+并指出具体差异（如退出码、标准输出、标准错误、旧标签丢失、部分新标签
+残留、登记顺序或文件内容变化）。
