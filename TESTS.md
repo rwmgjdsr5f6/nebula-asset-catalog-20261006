@@ -11,6 +11,7 @@
 - `tests/test_query_tag_mode_any_regression.py`：`query --tag-mode any` 任选标签查询（含默认/`all` 交集不变、与 `--type`、`--check-files` 组合及参数错误）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
+- `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍保留既有记录、不留部分新标签）。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -524,3 +525,69 @@ OK
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
 并指出对应场景。
+
+## retag 写入中途失败原子性专项回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行（验收入口）：
+
+```sh
+python -m unittest discover -s tests -p test_retag_atomicity.py -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_retag_atomicity.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用：
+  `add` 仅用于准备样例，`query`/`export` 用于核对替换结果，测试对象为 `retag`
+  写入中途失败的原子性约定。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖外部素材、权限差异、
+  网络或第三方库（仅用 Python 3 标准库）。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 固定场景与预期
+
+样例只含两个临时演示文件，按 A.bin、B.bin 顺序登记：A 类型 `image`、
+标签依次为 `demo`、`ui`；B 类型 `audio`、标签只有 `demo`。
+
+1. 样例库保留现有兼容表结构（`asset`、`asset_tag` 及索引）和正常读取功能；
+   在其上设置一个**仅拒绝 `blocked` 标签写入**的固定条件（BEFORE INSERT
+   触发器），允许此前的 `project` 标签写入。设置后 `export` 仍原样返回 A、B。
+2. 执行 `retag A.bin --tag project --tag blocked`：删除旧标签后，第一个新标签
+   `project` 写入成功，第二个新标签 `blocked` 写入被拒，失败来自第二个新标签
+   的写入；参数及数据库读取均有效。预期**退出码 2、标准输出为空**，标准错误
+   说明数据库读写失败、点名 `blocked`，且**不含调用栈**。
+3. 失败后重新通过公开入口读取同一目录：
+   - A 的完整旧标签及顺序仍为 `["demo", "ui"]`；
+   - B 的记录与两条素材的登记顺序（A、B）均不变；
+   - 查询 `project` 与 `blocked` 均返回 `[]`（不留部分新标签）；
+   - 查询 `demo` 仍按原顺序返回 A、B；
+   - 两个素材文件的内容保持不变。
+4. 在同一测试场景中撤去拒绝条件（DROP TRIGGER），再次提交相同的替换命令：
+   退出码 0、标准错误为空，标准输出为既有格式（仅含 `path`、`type`、`tags`）
+   的 A 记录，标签为 `["project", "blocked"]`。
+5. 由**新进程**导出仍得到 A、B（登记顺序不变），只有 A 的标签改变，B 不变；
+   `project`、`blocked` 查询命中 A，`demo` 查询只剩 B；素材文件内容始终不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_mid_write_failure_keeps_old_tags_then_succeeds_when_condition_removed ... ok
+
+----------------------------------------------------------------------
+Ran 1 tests in ...s
+
+OK
+```
+
+重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
+并指出具体差异（退出码、输出、错误信息、持久化记录或素材文件内容）。
