@@ -52,6 +52,10 @@ def build_parser():
 
     query_parser = subparsers.add_parser("query", help="按完整标签查询素材")
     query_parser.add_argument("--tag", required=True, help="要精确匹配的标签（必填）")
+    query_parser.add_argument(
+        "--type",
+        help="可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写）",
+    )
     query_parser.set_defaults(handler=handle_query)
 
     return parser
@@ -194,17 +198,30 @@ def handle_query(args):
     if not tag:
         raise CliError("查询标签 --tag 去除首尾空白后不能为空")
 
+    asset_type = None
+    if args.type is not None:
+        asset_type = args.type.strip()
+        if not asset_type:
+            raise CliError("素材类型 --type 去除首尾空白后不能为空")
+
     conn = open_database(args.db)
     try:
+        if asset_type is None:
+            type_clause = ""
+            params = (tag,)
+        else:
+            type_clause = "AND a.type = ?"
+            params = (tag, asset_type)
         rows = conn.execute(
-            """
+            f"""
             SELECT a.id, a.path, a.type, t.tag
             FROM asset_tag t
             JOIN asset a ON a.id = t.asset_id
             WHERE t.tag = ?
+            {type_clause}
             ORDER BY a.id ASC, t.position ASC
             """,
-            (tag,),
+            params,
         ).fetchall()
 
         asset_ids = []
