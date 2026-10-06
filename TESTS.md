@@ -10,6 +10,7 @@
 - `tests/test_query_multi_tag_regression.py`：`query` 多标签（重复 `--tag`）交集查询的回归测试。
 - `tests/test_query_tag_mode_any_regression.py`：`query --tag-mode any` 任选标签查询（含默认/`all` 交集不变、与 `--type`、`--check-files` 组合及参数错误）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
+- `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -442,6 +443,81 @@ test_unsupported_export_arguments_rejected ... ok
 
 ----------------------------------------------------------------------
 Ran 11 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。
+
+## retag 标签替换回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_retag_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_retag_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`query`/`export` 用于验证持久化结果，测试对象为 `retag`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A、B 顺序登记：A 类型 `image`，标签依次为 `demo`、`ui`；
+B 类型 `audio`，标签只有 `demo`。
+
+1. 验收场景：`retag A --tag " project " --tag ui --tag project` 成功，
+   退出码 0、标准错误为空，标准输出仅为含 `path`、`type`、`tags` 的 JSON 对象，
+   A 的 `tags` 为 `["project", "ui"]`（去除首尾空白、按首次出现顺序去重、
+   保留大小写）；随后 `export` 仍按 A、B 顺序返回且 B 不变。
+2. 持久化：新进程 `query` 中 `project` 命中 A、被移除的 `demo` 不再使 A 入选；
+   `all`/`any`、类型筛选与 `--check-files` 规则不变。
+3. 路径等价写法（相对路径、含 `.` 的写法）定位同一记录；重复提交相同的
+   规范化标签与顺序仍成功。
+4. 源文件已删除或原路径变成目录仍可改标签；素材文件内容保持只读。
+5. 缺少路径或 `--tag`、路径为空、任一标签为空或只有空白、传入不支持的参数：
+   退出码 2、标准输出为空、标准错误说明原因且不含调用栈；参数错误不创建数据库。
+6. 目标未登记：退出码 2，标准错误含规范路径；数据库文件不存在但父目录存在时
+   创建空库后报告未登记，父目录缺失时报错且不补建目录。
+7. 数据库路径指向目录、非 SQLite 文件、含其他业务表的 SQLite 文件：
+   均被拒绝，文件字节前后完全一致；失败不新增素材、不改变已有记录、
+   不留部分新标签。
+8. `retag` 之后 `add` 仍拒绝同一规范路径的重复登记。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_add_still_rejects_duplicate_path_after_retag ... ok
+test_argument_errors_do_not_create_database ... ok
+test_database_open_and_schema_errors_rejected ... ok
+test_deleted_or_directory_source_still_retaggable ... ok
+test_equivalent_path_spellings_resolve_same_record ... ok
+test_fresh_database_created_then_unregistered_reported ... ok
+test_missing_parent_directory_is_not_created ... ok
+test_missing_path_or_tag_rejected ... ok
+test_retag_does_not_touch_source_file_content ... ok
+test_retag_persists_for_query_in_new_process ... ok
+test_retag_replaces_tags_and_export_reflects_change ... ok
+test_same_normalized_tags_repeated_succeeds ... ok
+test_unregistered_target_rejected_with_canonical_path ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in ...s
 
 OK
 ```

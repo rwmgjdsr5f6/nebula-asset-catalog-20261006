@@ -1,4 +1,5 @@
-"""命令行入口：素材登记（add）、按标签查询（query）与完整目录导出（export）。
+"""命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）
+与标签替换（retag）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -82,6 +83,18 @@ def build_parser():
         "export", help="导出完整目录中全部素材的登记元数据"
     )
     export_parser.set_defaults(handler=handle_export)
+
+    retag_parser = subparsers.add_parser(
+        "retag", help="完整替换一条已登记素材的标签"
+    )
+    retag_parser.add_argument("path", help="已登记素材的路径")
+    retag_parser.add_argument(
+        "--tag",
+        action="append",
+        required=True,
+        help="新标签，可重复传入且至少一个；完整替换旧标签",
+    )
+    retag_parser.set_defaults(handler=handle_retag)
 
     return parser
 
@@ -354,6 +367,52 @@ def handle_export(args):
 
     # 按首次登记顺序（id 升序）每条素材输出一次；空目录输出 []。
     print(json.dumps(result, ensure_ascii=False))
+    return EXIT_OK
+
+
+def handle_retag(args):
+    # 路径按 add 的同一规则解析为规范绝对路径，等价写法定位同一记录；
+    # 不要求源文件当前存在或仍是普通文件，已删除或变成目录也可改标签。
+    if not args.path:
+        raise CliError("素材路径不能为空")
+    canonical_path = os.path.realpath(args.path)
+
+    # 新标签完整替换旧标签：去除首尾空白、按首次出现顺序去重、保留大小写；
+    # 校验在打开数据库之前完成，参数错误不创建数据库。
+    tags = normalize_tags(args.tag)
+
+    conn = open_database(args.db)
+    try:
+        row = conn.execute(
+            "SELECT id, type FROM asset WHERE path = ?", (canonical_path,)
+        ).fetchone()
+        if row is None:
+            raise CliError(f"素材未登记: {canonical_path}")
+        asset_id, asset_type = row
+
+        # 删除旧标签与写入新标签在同一事务中提交：失败时整体回滚，
+        # 不新增素材、不改变已有记录，也不留下部分新标签。
+        conn.execute(
+            "DELETE FROM asset_tag WHERE asset_id = ?", (asset_id,)
+        )
+        conn.executemany(
+            "INSERT INTO asset_tag(asset_id, tag, position) VALUES (?, ?, ?)",
+            [(asset_id, tag, position) for position, tag in enumerate(tags)],
+        )
+        conn.commit()
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise CliError(f"数据库读写失败: {exc}")
+    finally:
+        conn.close()
+
+    # 只替换标签：路径、类型、首次登记顺序与其他素材的记录保持不变。
+    print(
+        json.dumps(
+            {"path": canonical_path, "type": asset_type, "tags": tags},
+            ensure_ascii=False,
+        )
+    )
     return EXIT_OK
 
 
