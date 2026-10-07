@@ -12,6 +12,7 @@
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
 - `tests/test_retag_append_regression.py`：`retag --append` 标签追加（保留旧标签、末尾追加、去重与大小写、幂等、原子性与各类错误）的回归测试。
+- `tests/test_retag_remove_regression.py`：`retag --remove` 标签移除（保留顺序、区分大小写、幂等、至少保留一个标签、与 `--append` 互斥、原子性与各类错误）的回归测试。
 - `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍保留既有记录、不留部分新标签）。
 - `tests/test_add_write_failure_regression.py`：`add` 写入被数据库约束或触发器拒绝时的失败原因归类回归测试（未登记路径报数据库写入失败而非已登记、整体回滚、撤去条件后恢复成功、真实重复仍拒绝）。
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
@@ -602,6 +603,95 @@ test_retag_without_append_still_replaces_all_tags ... ok
 
 ----------------------------------------------------------------------
 Ran 15 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。
+
+## retag 标签移除（--remove）回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_retag_remove_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_retag_remove_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`query`/`export` 用于验证持久化结果，测试对象为 `retag --remove`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A、B 顺序登记：A 类型 `image`，标签依次为 `demo`、`ui`、`UI`；
+B 类型 `audio`，标签只有 `demo`。
+
+1. 验收命令 `retag A.bin --remove --tag " ui " --tag absent`：
+   退出码 0、标准错误为空，标准输出仅为含 `path`、`type`、`tags` 的 JSON 对象，
+   A 的标签为 `["demo", "UI"]`，类型与规范路径不变，B 不变；
+   新进程 `export` 仍按 A、B 顺序返回，`query --tag ui` 不再返回 A，
+   `query --tag UI` 仍返回 A；随后移除 A 的 `demo` 与 `UI` 整次拒绝，
+   两个标签保留。
+2. 移除规则：待移除标签去除首尾空白、按完整文本区分大小写匹配
+   （`ui` 与 `UI` 是两个标签），重复条件只生效一次；未指定的标签保持
+   原顺序，不存在的标签忽略，重复移除同一批标签仍成功。
+3. 素材至少保留一个标签：一次指定全部标签（含重复与空白写法）或对单标签
+   素材移除唯一标签时整次拒绝（退出码 2，标准错误说明不能移除全部标签），
+   原记录与标签顺序完整保留。
+4. `--remove` 与 `--append` 互斥：同时指定按参数错误拒绝且不创建数据库；
+   不传 `--remove` 时保留原替换和追加行为。
+5. 等价路径写法（相对路径、含 `.` 的写法）定位同一记录；
+   源文件已删除或原路径变成目录仍可移除，操作不读取或改写素材内容。
+6. 缺少素材路径、路径为空、缺少 `--tag`、任一标签为空或只有空白、传入不支持
+   的参数、目标未登记（错误含规范路径）、数据库无法打开或读写、损坏或结构
+   不兼容时：退出码 2、标准输出为空、标准错误说明原因且不含调用栈；
+   参数错误不创建数据库；数据库文件不存在但父目录存在时创建空库后报告未登记，
+   父目录缺失时不补建目录。
+7. 移除中途失败（固定触发器只拒绝 `blocked` 标签写入）时整体回滚：
+   原记录与标签顺序完整保留，不留部分标签修改；撤去拒绝条件后同一命令成功。
+8. `--remove` 只属于 `retag`：`add`、`query`、`export` 收到它按参数错误拒绝，
+   既有记录不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_remove_acceptance_scenario ... ok
+test_remove_and_append_are_mutually_exclusive ... ok
+test_remove_argument_errors_do_not_create_database ... ok
+test_remove_argument_errors_rejected ... ok
+test_remove_all_tags_rejected_and_record_kept ... ok
+test_remove_database_open_and_schema_errors_rejected ... ok
+test_remove_deleted_or_directory_source_still_works ... ok
+test_remove_does_not_touch_source_file_content ... ok
+test_remove_equivalent_path_spellings_resolve_same_record ... ok
+test_remove_fresh_database_created_then_unregistered_reported ... ok
+test_remove_is_case_sensitive_and_dedups_conditions ... ok
+test_remove_mid_write_failure_keeps_old_tags_then_recovers ... ok
+test_remove_missing_parent_directory_is_not_created ... ok
+test_remove_option_rejected_by_other_commands ... ok
+test_remove_preserves_order_of_remaining_tags ... ok
+test_remove_unregistered_target_rejected_with_canonical_path ... ok
+test_mutually_exclusive_modes_do_not_create_database ... ok
+test_repeated_remove_is_idempotent ... ok
+test_retag_without_remove_keeps_replace_and_append_behavior ... ok
+
+----------------------------------------------------------------------
+Ran 19 tests in ...s
 
 OK
 ```
