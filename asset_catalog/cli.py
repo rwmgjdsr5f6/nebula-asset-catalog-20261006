@@ -367,6 +367,58 @@ def build_records(conn, rows):
     return [records[asset_id] for asset_id in records]
 
 
+def apply_file_status_rules(records, *, check_files, status_filter):
+    """对候选记录统一执行文件状态规则，供 --check-files 与 --file-status
+    共用同一套处理逻辑，组合语义可直接对照下表核对：
+
+    check_files | status_filter | 结果
+    ------------+---------------+------------------------------------------
+    否          | None          | 不检查文件；原样返回候选（仅 path、type、
+                |               | tags）
+    是          | None          | 保留全部候选，逐条追加 file_status
+    否          | 给定状态      | 只保留状态相符的候选以缩小结果，不增加字段
+    是          | 给定状态      | 只保留状态相符的候选，并给入选记录追加
+                |               | file_status，其值必与筛选值一致
+
+    候选的确定（标签命中、--type、--exclude-tag）在调用前完成：未命中或
+    被排除的素材不会出现在 records 中，因此其路径不会被检查状态。
+
+    先读取完全部候选的状态再组装输出：任一候选因权限或其他系统错误无法
+    判断状态时，check_file_status 抛出 CliError，本函数不修改任何记录，
+    由上层保证整次命令退出码 2、标准输出为空、不输出部分结果。
+
+    记录的首次登记顺序、每条素材只出现一次以及完整标签及顺序均由候选
+    本身保证：只附加状态时保持原顺序与条数，筛选时保持入选候选的相对
+    顺序，本函数不重排、不去重标签。
+    """
+    if not check_files and status_filter is None:
+        # 两组选项均未启用：完全不访问文件系统。
+        return records
+
+    # 先逐条读取全部候选的当前状态再决定取舍与输出：此处任一失败都会
+    # 整体抛出，此前读到的状态只存在于本地列表，不会产生部分输出。
+    statuses = [check_file_status(record["path"]) for record in records]
+
+    if status_filter is not None:
+        # 只要求状态筛选：缩小结果；入选记录的状态必与筛选值一致。
+        selected = [
+            (record, status)
+            for record, status in zip(records, statuses)
+            if status == status_filter
+        ]
+    else:
+        # 只要求附加状态：保留全部候选及其相对顺序。
+        selected = list(zip(records, statuses))
+
+    if check_files:
+        # 同用时仅入选记录带状态字段，且字段值与筛选值一致；
+        # 单独使用 --check-files 时全部候选带各自的当前状态。
+        for record, status in selected:
+            record["file_status"] = status
+
+    return [record for record, _ in selected]
+
+
 def handle_query(args):
     # 每个标签分别去除首尾空白并按首次出现顺序去重；大小写保留，匹配区分
     # 大小写且不做子串匹配。tag_mode 为 all（默认）时素材需同时具备全部
@@ -439,22 +491,16 @@ def handle_query(args):
     finally:
         conn.close()
 
-    if args.file_status is not None:
-        # 先按标签与类型确定候选，再逐条读取当前状态筛选；未命中标签或
-        # 类型的素材不检查状态。先完成全部状态检查再输出：任一失败则
-        # 整次命令报错，不输出部分结果。
-        filtered = []
-        for record in result:
-            status = check_file_status(record["path"])
-            if status == args.file_status:
-                if args.check_files:
-                    record["file_status"] = status
-                filtered.append(record)
-        result = filtered
-    elif args.check_files:
-        # 先完成全部状态检查再输出：任一失败则整次命令报错，不输出部分结果。
-        for record in result:
-            record["file_status"] = check_file_status(record["path"])
+    # 标签命中方式、可选 --type 与 --exclude-tag 已确定候选（未命中或被
+    # 排除的素材不在其中，其路径不检查状态）；--check-files 与
+    # --file-status 的全部组合由同一套规则处理。任一候选状态读取失败时
+    # apply_file_status_rules 抛出 CliError，此前不输出任何内容，整次
+    # 命令按退出码 2 失败、不输出部分结果。
+    result = apply_file_status_rules(
+        result,
+        check_files=args.check_files,
+        status_filter=args.file_status,
+    )
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 
