@@ -1,5 +1,5 @@
 """命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）、
-标签替换、追加或移除（retag）与类型修改（retype）。
+按路径查看单条记录（show）、标签替换、追加或移除（retag）与类型修改（retype）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -101,6 +101,12 @@ def build_parser():
         "export", help="导出完整目录中全部素材的登记元数据"
     )
     export_parser.set_defaults(handler=handle_export)
+
+    show_parser = subparsers.add_parser(
+        "show", help="按路径查看单条已登记素材的记录"
+    )
+    show_parser.add_argument("path", help="已登记素材的路径")
+    show_parser.set_defaults(handler=handle_show)
 
     retag_parser = subparsers.add_parser(
         "retag", help="替换、追加或移除一条已登记素材的标签"
@@ -525,6 +531,41 @@ def handle_export(args):
 
     # 按首次登记顺序（id 升序）每条素材输出一次；空目录输出 []。
     print(json.dumps(result, ensure_ascii=False))
+    return EXIT_OK
+
+
+def handle_show(args):
+    # 路径按 add 的同一规则解析为规范绝对路径：相对路径、含 . 或 .. 的
+    # 等价写法以及解析后指向同一登记路径的符号链接都定位同一记录。
+    # 只读查看：不读取素材内容，也不检查登记路径当前的文件状态，
+    # 源文件已删除或原路径变成目录时仍返回登记记录。
+    if not args.path:
+        raise CliError("素材路径不能为空")
+    canonical_path = os.path.realpath(args.path)
+
+    conn = open_database(args.db)
+    try:
+        row = conn.execute(
+            "SELECT id, type FROM asset WHERE path = ?", (canonical_path,)
+        ).fetchone()
+        if row is None:
+            raise CliError(f"素材未登记: {canonical_path}")
+        asset_id, asset_type = row
+
+        # 完整标签按登记顺序（position 升序）读取，原样反映当前保存的标签。
+        tags = fetch_current_tags(conn, asset_id)
+    except sqlite3.Error as exc:
+        raise CliError(f"数据库读取失败: {exc}")
+    finally:
+        conn.close()
+
+    # 只读不写：登记顺序、类型与标签及其他素材的记录保持不变。
+    print(
+        json.dumps(
+            {"path": canonical_path, "type": asset_type, "tags": tags},
+            ensure_ascii=False,
+        )
+    )
     return EXIT_OK
 
 
