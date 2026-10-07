@@ -210,19 +210,31 @@ def handle_add(args):
         if existing is not None:
             raise CliError(f"素材已登记，拒绝重复登记: {canonical_path}")
 
-        cur = conn.execute(
-            "INSERT INTO asset(path, type) VALUES (?, ?)",
-            (canonical_path, asset_type),
-        )
+        # 只有素材行自身的唯一约束冲突才属于重复登记：预检查之后仍可能因
+        # 并发写入同一规范路径而在此处被拒，约束只可能冲突于 path 唯一索引。
+        try:
+            cur = conn.execute(
+                "INSERT INTO asset(path, type) VALUES (?, ?)",
+                (canonical_path, asset_type),
+            )
+        except sqlite3.IntegrityError:
+            raise CliError(f"素材已登记，拒绝重复登记: {canonical_path}")
         asset_id = cur.lastrowid
-        conn.executemany(
-            "INSERT INTO asset_tag(asset_id, tag, position) VALUES (?, ?, ?)",
-            [(asset_id, tag, position) for position, tag in enumerate(tags)],
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
+
+        # 标签写入被数据库约束或触发器拒绝时，路径尚未登记，不属于重复：
+        # 报告数据库写入失败并保留数据库给出的拒绝原因，素材行与已写入的
+        # 标签整体回滚，不残留部分记录。
+        try:
+            conn.executemany(
+                "INSERT INTO asset_tag(asset_id, tag, position) VALUES (?, ?, ?)",
+                [(asset_id, tag, position) for position, tag in enumerate(tags)],
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            raise CliError(f"数据库写入失败: {exc}")
+    except CliError:
         conn.rollback()
-        raise CliError(f"素材已登记，拒绝重复登记: {canonical_path}")
+        raise
     except sqlite3.Error as exc:
         conn.rollback()
         raise CliError(f"数据库写入失败: {exc}")
