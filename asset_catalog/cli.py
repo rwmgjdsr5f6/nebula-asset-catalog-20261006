@@ -1,5 +1,6 @@
 """命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）、
-按路径查看单条记录（show）、标签替换、追加或移除（retag）与类型修改（retype）。
+按路径查看单条记录（show）、标签替换、追加或移除（retag）、类型修改（retype）
+与已用标签统计（tags）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -101,6 +102,11 @@ def build_parser():
         "export", help="导出完整目录中全部素材的登记元数据"
     )
     export_parser.set_defaults(handler=handle_export)
+
+    tags_parser = subparsers.add_parser(
+        "tags", help="列出全部已用标签及使用各标签的已登记素材数"
+    )
+    tags_parser.set_defaults(handler=handle_tags)
 
     show_parser = subparsers.add_parser(
         "show", help="按素材路径查看单条已登记记录"
@@ -535,6 +541,37 @@ def handle_export(args):
         conn.close()
 
     # 按首次登记顺序（id 升序）每条素材输出一次；空目录输出 []。
+    print(json.dumps(result, ensure_ascii=False))
+    return EXIT_OK
+
+
+def handle_tags(args):
+    # 只统计数据库中当前保存的标签：不读取素材内容、不检查登记路径当前的
+    # 文件状态，也不扫描目录，因此源文件已删除或原路径变成目录的素材仍
+    # 参与统计；不改动数据库或源文件。
+    conn = open_database(args.db)
+    try:
+        # 标签按完整文本分组，区分大小写、不改写标签文本；同一素材的同一
+        # 标签只计一次（asset_tag 主键已保证唯一，DISTINCT 使语义显式）。
+        # 没有素材使用的标签不在 asset_tag 中，自然不会输出零计数项。
+        rows = conn.execute(
+            """
+            SELECT tag, COUNT(DISTINCT asset_id) AS asset_count
+            FROM asset_tag
+            GROUP BY tag
+            """
+        ).fetchall()
+    except sqlite3.Error as exc:
+        raise CliError(f"数据库读取失败: {exc}")
+    finally:
+        conn.close()
+
+    # 每个标签只出现一次，按标签文本的 Unicode 码点字典序升序排列；
+    # 空目录输出 []。
+    result = [
+        {"tag": tag, "asset_count": asset_count}
+        for tag, asset_count in sorted(rows, key=lambda row: row[0])
+    ]
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 
