@@ -34,6 +34,12 @@ python -m asset_catalog --db catalog.sqlite query --tag demo --tag ui --type ima
 python -m asset_catalog --db catalog.sqlite query --tag-mode any --tag demo --tag ui --type image
 # 不传 --type 时查询范围、输出与排序均与只按标签查询一致
 
+# 查询时可选再按当前文件状态筛选：只返回状态匹配的素材，输出字段不变
+python -m asset_catalog --db catalog.sqlite query --tag demo --file-status missing
+# 与 --check-files 同用时，入选记录追加与筛选值一致的 file_status
+python -m asset_catalog --db catalog.sqlite query --tag demo --file-status missing --check-files
+# 不传 --file-status 时不按状态筛选，查询行为与之前一致
+
 # 导出完整目录：无筛选参数，标准输出仅为一个 JSON 数组
 python -m asset_catalog --db catalog.sqlite export
 # [{"path": "/abs/path/demo.png", "type": "image", "tags": ["demo"]}]
@@ -55,6 +61,7 @@ python -m asset_catalog --db catalog.sqlite retag demo.png --tag project --tag u
 - `--tag-mode` 只接受小写 `all` 或 `any`：缺少值、为空、含首尾空白、大小写不符或取其他值时按参数错误处理（退出码 2、标准输出为空、标准错误指出该选项）；任一 `--tag` 为空或只有空白时同样拒绝整次查询（即使 `any` 的其他标签有效），错误原因指向 `--tag`。
 - 查询可通过 `--type` 在标签命中范围内再按类型完整匹配筛选；与 `any` 一起使用时，素材既要命中任一标签，也要匹配指定类型；非空类型无匹配时输出 `[]`，`--type` 缺失值或去空白后为空按参数错误处理（退出码 2）。
 - `--check-files` 只为最终入选记录追加 `file_status`（`present` / `missing` / `not_file`），任一入选记录状态无法读取时整次查询失败且不输出部分结果；未入选素材的文件状态不影响查询。不传该选项时不检查文件状态，源文件已删除仍可按登记标签入选。
+- `--file-status` 只改变入选范围：先按既有标签交集或并集及可选 `--type` 确定候选，再筛选当前文件状态为指定值的素材。普通文件属于 `present`，路径不存在或中间组件不是目录属于 `missing`，目录等非普通文件属于 `not_file`；符号链接按目标判断，断链属于 `missing`。单独使用时仍输出仅含 `path`、`type`、`tags` 的 JSON 数组；与 `--check-files` 同用时入选记录追加与筛选值一致的 `file_status`。结果保持首次登记顺序、每条素材只出现一次、完整标签及其顺序不变，无匹配输出 `[]`。任一候选因权限或其他系统错误无法判断状态时整次查询失败（退出码 2、标准输出为空、标准错误指出状态读取失败及相关路径），不输出部分结果；未命中标签或类型的素材不检查状态。该选项只接受小写 `present`、`missing`、`not_file`：缺值、为空、含首尾空白、大小写不符或取其他值时按参数错误处理（退出码 2、标准输出为空、标准错误指出 `--file-status`），不创建数据库。查询不保存状态、不改动记录和源文件。
 - `export` 不接受标签、类型等任何筛选参数，导出全部登记记录；结果按首次登记顺序排列，每条素材仅出现一次且只含 `path`、`type`、`tags`（无 `file_status` 或内部编号），保留规范绝对路径、类型文本与完整标签顺序。
 - 导出直接反映数据库中的登记记录：不读取素材内容、不检查登记路径当前的文件状态，源文件事后被删除或原路径变成目录都不会漏掉素材；导出不改动数据库与素材文件。
 - `retag` 用新标签完整替换一条已登记素材的旧标签：素材路径按与 `add` 相同的规则解析为规范绝对路径定位记录，等价写法命中同一记录；新标签去除首尾空白、按首次出现顺序去重、保留大小写，重复提交相同的规范化标签与顺序仍成功。只替换标签：素材路径、类型、首次登记顺序与其他素材的记录保持不变，源文件内容保持只读；源文件已删除或变成目录仍可修改标签。不提供批量修改或清空全部标签的操作。结果持久保存，之后的 `query` 与 `export` 反映新标签，被移除的标签不再使该素材入选。

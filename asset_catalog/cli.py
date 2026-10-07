@@ -77,6 +77,15 @@ def build_parser():
         action="store_true",
         help="为每条结果追加 file_status 字段，报告登记路径当前的文件状态",
     )
+    query_parser.add_argument(
+        "--file-status",
+        choices=("present", "missing", "not_file"),
+        help=(
+            "只返回当前文件状态为指定值的素材：present（普通文件）、"
+            "missing（路径不存在）、not_file（目录等非普通文件）。"
+            "只接受小写 present、missing 或 not_file"
+        ),
+    )
     query_parser.set_defaults(handler=handle_query)
 
     export_parser = subparsers.add_parser(
@@ -373,7 +382,19 @@ def handle_query(args):
     finally:
         conn.close()
 
-    if args.check_files:
+    if args.file_status is not None:
+        # 先按标签与类型确定候选，再逐条读取当前状态筛选；未命中标签或
+        # 类型的素材不检查状态。先完成全部状态检查再输出：任一失败则
+        # 整次命令报错，不输出部分结果。
+        filtered = []
+        for record in result:
+            status = check_file_status(record["path"])
+            if status == args.file_status:
+                if args.check_files:
+                    record["file_status"] = status
+                filtered.append(record)
+        result = filtered
+    elif args.check_files:
         # 先完成全部状态检查再输出：任一失败则整次命令报错，不输出部分结果。
         for record in result:
             record["file_status"] = check_file_status(record["path"])
