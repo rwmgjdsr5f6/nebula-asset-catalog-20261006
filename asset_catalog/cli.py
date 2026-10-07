@@ -69,6 +69,15 @@ def build_parser():
         help="要精确匹配的标签（必填，可重复传入；命中方式由 --tag-mode 决定）",
     )
     query_parser.add_argument(
+        "--exclude-tag",
+        action="append",
+        default=None,
+        help=(
+            "可选排除条件，可重复传入：先按 --tag 与 --tag-mode、--type "
+            "确定范围，再排除具备任一排除标签的素材（区分大小写、完整匹配）"
+        ),
+    )
+    query_parser.add_argument(
         "--type",
         help="可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写）",
     )
@@ -214,14 +223,18 @@ def verify_schema(conn):
         raise CliError("数据库表结构与本产品不兼容，拒绝覆盖或重建")
 
 
-def normalize_tags(raw_tags):
-    """去除首尾空白、按首次出现顺序去重；空标签报错。大小写保留。"""
+def normalize_tags(raw_tags, option="--tag"):
+    """去除首尾空白、按首次出现顺序去重；空标签报错。大小写保留。
+
+    option 仅用于错误信息，指出触发错误的具体选项（--tag 或
+    --exclude-tag）。
+    """
     tags = []
     seen = set()
     for raw in raw_tags:
         tag = raw.strip()
         if not tag:
-            raise CliError("标签 --tag 去除首尾空白后不能为空")
+            raise CliError(f"标签 {option} 去除首尾空白后不能为空")
         if tag not in seen:
             seen.add(tag)
             tags.append(tag)
@@ -361,6 +374,15 @@ def handle_query(args):
     tags = normalize_tags(args.tag)
     tag_mode = args.tag_mode
 
+    # 排除标签同样逐个去除首尾空白、按首次出现顺序去重；任一为空或只有
+    # 空白即按参数错误拒绝整次查询。校验在打开数据库之前完成，参数错误
+    # 不创建数据库。
+    exclude_tags = (
+        normalize_tags(args.exclude_tag, option="--exclude-tag")
+        if args.exclude_tag is not None
+        else []
+    )
+
     asset_type = None
     if args.type is not None:
         asset_type = args.type.strip()
@@ -370,9 +392,23 @@ def handle_query(args):
     conn = open_database(args.db)
     try:
         type_clause = "AND a.type = ?" if asset_type is not None else ""
+        # 排除只作用于本次查询：在既有命中范围上排除具备任一排除标签的
+        # 素材（完整匹配、区分大小写）。不存在的排除标签不影响结果；
+        # 同一标签同时用于命中与排除时仍执行排除。被排除素材不进入候选，
+        # 因此后续文件状态检查也不会触及其路径。
+        exclude_clause = ""
+        if exclude_tags:
+            exclude_clause = (
+                "AND NOT EXISTS ("
+                "SELECT 1 FROM asset_tag et "
+                "WHERE et.asset_id = a.id AND et.tag IN "
+                f"({','.join('?' for _ in exclude_tags)})"
+                ")"
+            )
         params = [*tags]
         if asset_type is not None:
             params.append(asset_type)
+        params.extend(exclude_tags)
         if tag_mode == "all":
             # 素材在命中标签集合中的不同标签数等于条件标签数时，
             # 才同时具备全部标签；每个素材只入选一次。
@@ -389,6 +425,7 @@ def handle_query(args):
             JOIN asset a ON a.id = t.asset_id
             WHERE t.tag IN ({",".join("?" for _ in tags)})
             {type_clause}
+            {exclude_clause}
             GROUP BY a.id
             {having_clause}
             ORDER BY a.id ASC

@@ -9,6 +9,7 @@
 - `tests/test_add_db_as_asset_regression.py`：`add` 拒绝把目录数据库自身登记为素材的回归测试；
 - `tests/test_query_multi_tag_regression.py`：`query` 多标签（重复 `--tag`）交集查询的回归测试。
 - `tests/test_query_tag_mode_any_regression.py`：`query --tag-mode any` 任选标签查询（含默认/`all` 交集不变、与 `--type`、`--check-files` 组合及参数错误）的回归测试。
+- `tests/test_query_exclude_tag_regression.py`：`query --exclude-tag` 按标签排除素材（含 all/any 与 `--type`、命中与排除同标签、与 `--check-files`/`--file-status` 组合、参数错误与其他子命令拒绝）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
 - `tests/test_retag_append_regression.py`：`retag --append` 标签追加（保留旧标签、末尾追加、去重与大小写、幂等、原子性与各类错误）的回归测试。
@@ -378,6 +379,80 @@ test_tag_mode_rejected_for_other_subcommands ... ok
 
 ----------------------------------------------------------------------
 Ran 11 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出失败场景。
+
+## query 按标签排除素材（--exclude-tag）回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest discover -s tests -p test_query_exclude_tag_regression.py -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_query_exclude_tag_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，测试对象为 `query` 的 `--exclude-tag` 语义）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A、B、C 顺序登记为 `image`：A 标签 `demo`、`ui`；
+B 标签 `demo`、`archived`；C 标签 `ui`。
+
+1. 验收：`query --tag-mode any --tag demo --tag ui --exclude-tag archived`
+   先按 any 与可选类型确定范围（A、B、C），再排除具备 `archived` 的 B，
+   只按 A、C 的首次登记顺序输出，每条只出现一次，记录仅含 `path`、
+   `type`、`tags`，完整标签保持原顺序。
+2. 同一数据库 `query --tag demo --tag ui --exclude-tag ui`（all 语义）
+   命中的 A 同时具备排除标签 `ui`，仍执行排除、不报冲突错误，输出 `[]`；
+   两次成功均退出码 0、标准错误为空、标准输出仅为 JSON 数组。
+3. 排除标签逐个去除首尾空白，重复条件只生效一次，条件顺序不影响结果，
+   按完整文本区分大小写匹配；不存在的排除标签不影响结果。
+4. 与 `--type` 同用时先按标签与类型确定范围再排除；不传 `--exclude-tag`
+   时保持已有查询行为。
+5. 排除只作用于本次查询：`export` 仍按 A、B、C 返回完整记录，
+   不修改记录或源文件，旧数据库无需迁移。
+6. 与 `--check-files` 或 `--file-status` 同用时，被排除素材不检查文件
+   状态（样例删除被排除的 B 后查询仍成功），剩余范围沿用既有状态规则。
+7. `--exclude-tag` 缺值、为空或仅有空白时整次退出码 2、标准输出为空、
+   标准错误指出该选项且不含调用栈，即使其他条件有效也不返回部分结果，
+   且不创建数据库；失败后重新查询结果不变。
+8. `--exclude-tag` 只属于 `query`：`add`、`export`、`retag`、`retype`
+   收到它按参数错误拒绝（退出码 2、标准输出为空、标准错误指出该选项），
+   既有记录保持不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_acceptance_any_exclude_archived_returns_a_c ... ok
+test_acceptance_same_tag_hit_and_excluded_returns_empty ... ok
+test_blank_or_missing_exclude_tag_rejected_without_creating_db ... ok
+test_exclude_is_query_only_and_does_not_modify_records ... ok
+test_exclude_normalization_duplicates_order_whitespace_case ... ok
+test_exclude_tag_rejected_by_other_subcommands ... ok
+test_exclude_with_type_and_without_option ... ok
+test_excluded_asset_file_status_not_checked ... ok
+
+----------------------------------------------------------------------
+Ran 8 tests in ...s
 
 OK
 ```
