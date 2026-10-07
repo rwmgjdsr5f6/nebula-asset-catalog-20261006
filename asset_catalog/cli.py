@@ -181,6 +181,17 @@ def normalize_tags(raw_tags):
     return tags
 
 
+def _path_registered(conn, canonical_path):
+    """登记表中是否已存在该规范路径；查询本身失败时按未登记处理。"""
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM asset WHERE path = ?", (canonical_path,)
+        ).fetchone()
+    except sqlite3.Error:
+        return False
+    return row is not None
+
+
 def handle_add(args):
     asset_type = args.type.strip()
     if not asset_type:
@@ -210,22 +221,27 @@ def handle_add(args):
         if existing is not None:
             raise CliError(f"素材已登记，拒绝重复登记: {canonical_path}")
 
-        cur = conn.execute(
-            "INSERT INTO asset(path, type) VALUES (?, ?)",
-            (canonical_path, asset_type),
-        )
-        asset_id = cur.lastrowid
-        conn.executemany(
-            "INSERT INTO asset_tag(asset_id, tag, position) VALUES (?, ?, ?)",
-            [(asset_id, tag, position) for position, tag in enumerate(tags)],
-        )
-        conn.commit()
-    except sqlite3.IntegrityError:
-        conn.rollback()
-        raise CliError(f"素材已登记，拒绝重复登记: {canonical_path}")
-    except sqlite3.Error as exc:
-        conn.rollback()
-        raise CliError(f"数据库写入失败: {exc}")
+        try:
+            cur = conn.execute(
+                "INSERT INTO asset(path, type) VALUES (?, ?)",
+                (canonical_path, asset_type),
+            )
+            asset_id = cur.lastrowid
+            conn.executemany(
+                "INSERT INTO asset_tag(asset_id, tag, position) VALUES (?, ?, ?)",
+                [(asset_id, tag, position) for position, tag in enumerate(tags)],
+            )
+            conn.commit()
+        except sqlite3.Error as exc:
+            conn.rollback()
+            # 完整性错误不一定来自重复路径：触发器或其他约束同样会拒绝
+            # 写入。回滚后按登记表的实际内容归类——该规范路径已存在才算
+            # 重复登记，否则说明数据库写入失败并保留数据库给出的原因。
+            if isinstance(exc, sqlite3.IntegrityError) and _path_registered(
+                conn, canonical_path
+            ):
+                raise CliError(f"素材已登记，拒绝重复登记: {canonical_path}")
+            raise CliError(f"数据库写入失败: {exc}")
     finally:
         conn.close()
 

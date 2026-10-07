@@ -12,6 +12,7 @@
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
 - `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍保留既有记录、不留部分新标签）。
+- `tests/test_add_write_failure_regression.py`：`add` 写入被数据库约束或触发器拒绝时的失败原因归类回归测试（未登记路径报数据库写入失败而非已登记、整体回滚、撤去条件后恢复成功、真实重复仍拒绝）。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -585,6 +586,74 @@ test_mid_write_failure_keeps_old_tags_then_succeeds_when_condition_removed ... o
 
 ----------------------------------------------------------------------
 Ran 1 tests in ...s
+
+OK
+```
+
+重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
+并指出具体差异（退出码、输出、错误信息、持久化记录或素材文件内容）。
+
+## add 写入失败原因归类回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_add_write_failure_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_add_write_failure_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
+  测试对象为 `add` 在数据库约束或触发器拒绝写入时的失败原因归类；
+  `query`/`export` 用于核对持久化结果。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖外部素材、
+  网络或第三方库（仅用 Python 3 标准库）。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 固定场景与预期
+
+样例只含两个内容固定、路径不同的临时演示文件 A.bin、B.bin。
+先正常登记 A：类型 `image`，标签依次为 `demo`、`ui`。样例库保持原有
+兼容表结构（`asset`、`asset_tag` 及索引），另加一个 BEFORE INSERT
+触发器作为固定拒绝条件：只拒绝 `blocked` 标签写入，拒绝文本为
+`rejected by fixed condition: blocked`，其他标签允许写入。
+
+1. 失败归类：登记尚未入库的 B（类型 `audio`，标签依次为 `project`、
+   `blocked`），第二个标签被触发器拒绝时：退出码 2、标准输出为空，
+   标准错误说明**数据库写入失败**并保留数据库给出的拒绝文本
+   `rejected by fixed condition: blocked`，不声称素材已登记，
+   也不含调用栈。
+2. 失败原子性：失败后由**新进程** `export` 仍只得到 A 的原始完整记录；
+   查询 `project` 或 `blocked` 都得到 `[]`；直接读库确认不残留 B 的
+   素材记录或已经写入的 `project` 标签；两个源文件内容不变。
+3. 恢复成功：在同一样例库撤去拒绝条件（DROP TRIGGER）后原样提交 B 的
+   登记：退出码 0、标准错误为空，标准输出是仅含 `path`、`type`、`tags`
+   的单条 JSON 记录，标签为 `["project", "blocked"]`；新进程导出按首次
+   登记顺序返回 A、B，各一次。
+4. 真实重复：恢复成功后以绝对路径、含 `.` / `..` 的等价写法再次登记 B，
+   仍按既有重复规则拒绝（退出码 2、标准输出为空、标准错误说明重复登记
+   并含冲突的规范绝对路径，无调用栈），原记录不被替换。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_add_succeeds_after_condition_removed ... ok
+test_trigger_rejection_reported_as_write_failure_and_rolls_back ... ok
+test_true_duplicate_still_rejected_and_record_not_replaced ... ok
+
+----------------------------------------------------------------------
+Ran 3 tests in ...s
 
 OK
 ```
