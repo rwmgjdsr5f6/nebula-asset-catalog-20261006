@@ -10,7 +10,7 @@
 - `tests/test_query_multi_tag_regression.py`：`query` 多标签（重复 `--tag`）交集查询的回归测试。
 - `tests/test_query_tag_mode_any_regression.py`：`query --tag-mode any` 任选标签查询（含默认/`all` 交集不变、与 `--type`、`--check-files` 组合及参数错误）的回归测试。
 - `tests/test_query_exclude_tag_regression.py`：`query --exclude-tag` 按标签排除素材（含 all/any 与 `--type`、命中与排除同标签、与 `--check-files`/`--file-status` 组合、参数错误与其他子命令拒绝）的回归测试。
-- `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
+- `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、`--check-files` 文件状态、空库与各类错误）的回归测试。
 - `tests/test_show_regression.py`：`show` 按路径查看单条记录（验收命令、等价路径与符号链接、源文件删除或变目录、未登记、参数与数据库错误、导出顺序不变）的回归测试。
 - `tests/test_show_file_status_regression.py`：`show --check-files` 单条记录文件状态查看（missing/not_file/present 验收序列、断链与中间组件、未登记与权限错误、只读与其他素材状态无关）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
@@ -500,12 +500,17 @@ B 类型 `audio`，标签只有 `music`。
 3. 空目录输出 `[]`：数据库文件不存在但父目录存在时创建空目录数据库并输出
    `[]`，新进程再次读取结论一致；父目录缺失时报错且不补建目录。
 4. 缺少 `--db`、数据库路径为空、向 `export` 传入不支持的参数
-   （`--tag`、位置参数、`--check-files`）、数据库路径指向目录：
+   （`--tag`、位置参数、`--type`、`--file-status`）、数据库路径指向目录：
    退出码 2、标准输出为空、标准错误说明原因且不含调用栈。
-5. 非 SQLite 文件、含其他业务表的 SQLite 文件（固定记录保留）、
+5. `export --check-files` 为每条记录追加 `file_status`：删除演示文件 B 后
+   仍按 A、B 的首次登记顺序返回两条完整记录，状态分别为 `present` 与
+   `missing`；登记路径当前指向目录时状态为 `not_file`，记录仍保留；
+   空目录带选项输出 `[]`；新进程默认导出仍不含 `file_status`，
+   不检查文件状态。
+6. 非 SQLite 文件、含其他业务表的 SQLite 文件（固定记录保留）、
    `asset` 缺少 `type` 列的不兼容结构：均被拒绝，文件字节前后完全一致，
    不被覆盖、补表或重建。
-6. 正常数据库截断为损坏镜像时导出：退出码 2、标准输出为空，
+7. 正常数据库截断为损坏镜像时导出：退出码 2、标准输出为空，
    不输出任何部分记录。
 
 ### 成功结果
@@ -513,6 +518,8 @@ B 类型 `audio`，标签只有 `music`。
 成功时输出 `OK`，例如：
 
 ```
+test_check_files_appends_file_status_in_registration_order ... ok
+test_check_files_reports_not_file_and_empty_catalog ... ok
 test_corrupt_and_incompatible_databases_rejected_and_untouched ... ok
 test_database_path_is_directory_rejected ... ok
 test_deleted_source_file_still_exported_without_file_status ... ok
@@ -526,7 +533,7 @@ test_missing_parent_directory_is_not_created ... ok
 test_unsupported_export_arguments_rejected ... ok
 
 ----------------------------------------------------------------------
-Ran 11 tests in ...s
+Ran 13 tests in ...s
 
 OK
 ```

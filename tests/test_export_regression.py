@@ -7,6 +7,8 @@
 - 导出全部素材，按首次登记顺序各出现一次，仅含 path、type、tags 三个字段；
 - 标签保留完整集合与登记顺序；空目录输出 []；
 - 源文件删除后记录仍在结果中，且不出现 file_status 字段；
+- --check-files 为每条记录追加 file_status（present / missing / not_file），
+  缺失或已变成目录的记录仍按首次登记顺序保留，空目录输出 []；
 - 导出不改变登记内容（之后 query --tag demo 结果不变），也不改动素材文件；
 - 数据库文件不存在但父目录存在时创建空目录数据库并输出 []，
   父目录缺失时不补建目录；
@@ -171,7 +173,53 @@ class ExportRegressionTest(unittest.TestCase):
         self.register_samples()
         self.assertExportError("--tag", "demo")
         self.assertExportError("extra-positional")
-        self.assertExportError("--check-files")
+        self.assertExportError("--type", "image")
+        self.assertExportError("--file-status", "present")
+
+    def test_check_files_appends_file_status_in_registration_order(self):
+        self.register_samples()
+        self.file_b.unlink()
+        self.assertFalse(self.file_b.exists())
+
+        result = self.run_cli("export", "--check-files")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        data = json.loads(result.stdout)
+        # 删除 B 后仍按首次登记顺序返回两条完整记录，仅追加 file_status。
+        self.assertEqual(
+            data,
+            [
+                {**self.expected_a, "file_status": "present"},
+                {**self.expected_b, "file_status": "missing"},
+            ],
+        )
+
+        # 新进程默认导出不检查文件状态，记录不含 file_status。
+        self.assertExportOk([self.expected_a, self.expected_b])
+
+    def test_check_files_reports_not_file_and_empty_catalog(self):
+        self.register_samples()
+        # 已登记路径当前指向目录：状态为 not_file，记录仍保留。
+        self.file_b.unlink()
+        self.file_b.mkdir()
+
+        result = self.run_cli("export", "--check-files")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(
+            data,
+            [
+                {**self.expected_a, "file_status": "present"},
+                {**self.expected_b, "file_status": "not_file"},
+            ],
+        )
+
+        # 空目录带选项输出 []。
+        fresh = self.tmp_dir / "fresh.sqlite"
+        result = self.run_cli("export", "--check-files", db=fresh)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout), [])
 
     def test_database_path_is_directory_rejected(self):
         target = self.tmp_dir / "a_directory"
