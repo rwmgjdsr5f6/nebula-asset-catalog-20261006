@@ -21,6 +21,7 @@
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
 - `tests/test_query_nested_path.py`：`query` 在登记路径的中间组件被替换为普通文件（不再是目录）时，文件状态检查与 `--file-status` 筛选仍把该路径归为 `missing`、目录记录可追溯的回归测试。
 - `tests/test_retype_write_failure_regression.py`：`retype` 类型写入被数据库触发器拒绝时旧记录完整保留、撤去拒绝条件后同一输入成功修改的回归测试。
+- `tests/test_tags_regression.py`：`tags` 全部已用标签统计（验收序列与 retag 生效、区分大小写与不同路径分别计数、Unicode 码点排序、源文件删除或变目录、只读、空库与各类参数/数据库错误）的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -1283,3 +1284,88 @@ OK
 
 重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
 并指出具体差异（退出码、输出、错误信息、持久化记录或素材文件内容）。
+
+## tags 全部已用标签统计回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_tags_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_tags_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add`/`retag` 仅用于准备与修改样例数据，`export` 用于核对登记内容，
+  测试对象为 `tags`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例 A.bin、B.bin 内容相同但路径不同，按 A、B 顺序登记：
+A 标签 `demo`、`ui`；B 标签 `demo`、`UI`。
+
+1. 验收：`tags` 退出码 0、标准错误为空，标准输出仅一行 JSON 数组，
+   依次为 `UI` 数量 1、`demo` 数量 2、`ui` 数量 1；每项只含 `tag` 与
+   `asset_count`，数量为正整数，标签不重复，顺序与 Unicode 码点字典序
+   （大写 U+0055 在小写之前）一致。
+2. `retag --remove` 从 A 移除 `ui` 后，下次统计只剩 `UI` 数量 1、
+   `demo` 数量 2；由全新进程再次读取同一数据库结论一致。
+3. 区分大小写、完整匹配：`ui` 与 `UI` 分别计数；标签文本原样输出。
+   同一素材重复追加同一标签不增加计数（每素材每标签只计一次）；
+   A、B 内容相同但不同登记路径分别计数（`demo` 为 2）。
+4. 非 ASCII 标签（`a`、`É`、`é`、`中 文`）按码点逐位排序，标签内部
+   空白与大小写原样保留。
+5. 删除源文件、把原登记路径替换为目录后统计结果不变：`tags` 不检查文件
+   状态、不读取素材内容、不扫描目录。
+6. 只读：成功统计后数据库字节、源文件字节不变，也不产生
+   `-journal`/`-wal`/`-shm` 侧车文件；`export` 的字段、标签顺序与
+   登记顺序保持不变。
+7. 空目录输出 `[]`：数据库不存在但父目录存在时初始化空库并返回 `[]`，
+   新进程再次读取一致；父目录缺失时退出码 2 且不补建目录。
+8. 缺少 `--db`、数据库路径为空字符串、向 `tags` 传入素材路径等位置参数
+   或 `--tag`、`--type`、`--check-files`、`--file-status`、`--append`、
+   `--remove`、未知选项：退出码 2、标准输出为空、标准错误指出参数与原因、
+   不含调用栈，且不创建数据库。
+9. 数据库路径指向目录、非 SQLite 文本、含其他业务表（固定记录保留）、
+   `asset` 缺 `type` 列的不兼容结构、截断的损坏镜像：退出码 2、
+   标准输出为空、不输出调用栈或部分数组，被拒绝文件的字节前后完全一致。
+
+### 成功结果
+
+成功时输出 `OK`，14 个用例全部通过：
+
+```
+test_acceptance_ui_demo_ui_counts_in_codepoint_order ... ok
+test_case_sensitive_exact_and_distinct_paths_count_separately ... ok
+test_corrupt_and_incompatible_databases_rejected_and_untouched ... ok
+test_database_path_is_directory_rejected ... ok
+test_deleted_or_directory_source_still_counted ... ok
+test_empty_database_outputs_empty_array ... ok
+test_empty_database_path_rejected ... ok
+test_malformed_database_produces_no_partial_output ... ok
+test_missing_db_option_rejected ... ok
+test_missing_parent_directory_is_not_created ... ok
+test_retag_remove_takes_effect_in_next_and_fresh_process ... ok
+test_tags_is_readonly_against_database_and_sources ... ok
+test_unicode_codepoint_ordering_and_verbatim_text ... ok
+test_unsupported_arguments_rejected_without_creating_database ... ok
+
+----------------------------------------------------------------------
+Ran 14 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。
