@@ -1,5 +1,5 @@
-"""命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）
-与标签替换、追加或移除（retag）。
+"""命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）、
+标签替换、追加或移除（retag）与类型修改（retype）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -115,6 +115,17 @@ def build_parser():
         help="从旧标签中移除指定标签，其余标签保持原顺序；与 --append 互斥",
     )
     retag_parser.set_defaults(handler=handle_retag)
+
+    retype_parser = subparsers.add_parser(
+        "retype", help="修改一条已登记素材的类型"
+    )
+    retype_parser.add_argument("path", help="已登记素材的路径")
+    retype_parser.add_argument(
+        "--type",
+        required=True,
+        help="新素材类型（必填），去除首尾空白后接受任意非空文本，保留大小写",
+    )
+    retype_parser.set_defaults(handler=handle_retype)
 
     return parser
 
@@ -503,6 +514,60 @@ def handle_retag(args):
         conn.close()
 
     # 只改标签：路径、类型、首次登记顺序与其他素材的记录保持不变。
+    print(
+        json.dumps(
+            {"path": canonical_path, "type": asset_type, "tags": tags},
+            ensure_ascii=False,
+        )
+    )
+    return EXIT_OK
+
+
+def handle_retype(args):
+    # 路径按 add 的同一规则解析为规范绝对路径，等价写法定位同一记录；
+    # 不要求源文件当前存在或仍是普通文件，已删除或变成目录也可改类型。
+    if not args.path:
+        raise CliError("素材路径不能为空")
+    canonical_path = os.path.realpath(args.path)
+
+    # 新类型去除首尾空白、保留大小写，接受任意非空文本，不按扩展名猜测；
+    # 校验在打开数据库之前完成，参数错误不创建数据库。
+    asset_type = args.type.strip()
+    if not asset_type:
+        raise CliError("素材类型 --type 去除首尾空白后不能为空")
+
+    conn = open_database(args.db)
+    try:
+        row = conn.execute(
+            "SELECT id FROM asset WHERE path = ?", (canonical_path,)
+        ).fetchone()
+        if row is None:
+            raise CliError(f"素材未登记: {canonical_path}")
+        (asset_id,) = row
+
+        tags = [
+            tag
+            for (tag,) in conn.execute(
+                "SELECT tag FROM asset_tag WHERE asset_id = ? "
+                "ORDER BY position ASC",
+                (asset_id,),
+            ).fetchall()
+        ]
+
+        # 类型更新在事务中提交：失败时整体回滚，保留既有记录，
+        # 不留下部分修改；提交与当前类型相同的值同样成功。
+        conn.execute(
+            "UPDATE asset SET type = ? WHERE id = ?", (asset_type, asset_id)
+        )
+        conn.commit()
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise CliError(f"数据库读写失败: {exc}")
+    finally:
+        conn.close()
+
+    # 只改类型：路径、完整标签及其顺序、首次登记顺序与其他素材的记录
+    # 保持不变。
     print(
         json.dumps(
             {"path": canonical_path, "type": asset_type, "tags": tags},
