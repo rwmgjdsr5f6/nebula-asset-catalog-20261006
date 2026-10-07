@@ -233,9 +233,9 @@ class ShowRegressionTest(unittest.TestCase):
         self.assertShowError()
         # 多余的位置参数。
         self.assertShowError(str(self.file_a), str(self.file_b))
-        # show 不接受标签或其他子命令的选项。
+        # show 不接受标签或其他子命令的选项（--check-files 已为 show 支持，
+        # 其行为见 tests/test_show_check_files_regression.py）。
         self.assertShowError(str(self.file_a), "--tag", "demo")
-        self.assertShowError(str(self.file_a), "--check-files")
         self.assertShowError(str(self.file_a), "--type", "image")
         self.assertShowError(str(self.file_a), "--append")
         self.assertShowError("--unknown-option", str(self.file_a))

@@ -12,6 +12,7 @@
 - `tests/test_query_exclude_tag_regression.py`：`query --exclude-tag` 按标签排除素材（含 all/any 与 `--type`、命中与排除同标签、与 `--check-files`/`--file-status` 组合、参数错误与其他子命令拒绝）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_show_regression.py`：`show` 按路径查看单条记录（验收命令、等价路径与符号链接、源文件删除或变目录、未登记、参数与数据库错误、导出顺序不变）的回归测试。
+- `tests/test_show_check_files_regression.py`：`show --check-files` 追加当前文件状态（present/missing/not_file 全序列、符号链接与断链、中间组件非目录、未登记不检查状态、权限错误失败口径、只读与其他命令不变）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
 - `tests/test_retag_append_regression.py`：`retag --append` 标签追加（保留旧标签、末尾追加、去重与大小写、幂等、原子性与各类错误）的回归测试。
 - `tests/test_retag_remove_regression.py`：`retag --remove` 标签移除（保留顺序、区分大小写、幂等、至少保留一个标签、与 `--append` 互斥、原子性与各类错误）的回归测试。
@@ -579,8 +580,9 @@ python tests/test_show_regression.py
 5. `retag`、`retype` 之后 `show` 反映当前保存的类型与完整标签，标签顺序
    不变；其他素材不受影响。
 6. 缺少素材路径或 `--db`、素材或数据库路径为空字符串、传入不支持的参数
-   （多余位置参数、`--tag`、`--type`、`--check-files`、`--append`、未知
-   选项）：退出码 2、标准输出为空、标准错误指出对应参数及原因且不含调用栈；
+   （多余位置参数、`--tag`、`--type`、`--append`、未知选项；`--check-files`
+   已为 show 接受，其专项测试见下文「show --check-files 文件状态回归测试」）：
+   退出码 2、标准输出为空、标准错误指出对应参数及原因且不含调用栈；
    参数错误不创建数据库。
 7. 数据库文件不存在但父目录存在时沿用空库创建规则后报告未登记，新进程
    `export` 该库得到 `[]`；父目录缺失时报错且不补建目录。
@@ -616,6 +618,93 @@ test_unregistered_c_rejected_by_relative_path_in_demo_directory ... ok
 
 ----------------------------------------------------------------------
 Ran 18 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。
+
+## show --check-files 文件状态回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_show_check_files_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_show_check_files_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`retag`/`retype`/`query`/`export` 用于核对其他
+  命令不受影响，测试对象为 `show --check-files`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或实际权限配置；
+  权限错误场景经 PYTHONPATH 注入 `sitecustomize` 垫片，在子进程内对指定
+  规范路径的 `os.stat` 固定抛出 `PermissionError`。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A.bin、B.bin 顺序登记：A 类型 `image`，标签依次为 `demo`、
+`ui`；B 类型 `audio`，标签只有 `music`。
+
+1. 固定样例全序列：删除已登记的 `A.bin` 后执行
+   `show A.bin --check-files` 返回原规范路径、`image`、`["demo", "ui"]` 与
+   `file_status="missing"`；随后不带开关的 `show A.bin` 返回相同元数据且
+   没有状态字段；原位置换成目录返回 `not_file`（不带开关仍只返回登记记录）；
+   恢复普通文件后返回 `present`，全程无需重新登记。
+2. 状态定义与 query 一致：普通文件 `present`；断开的符号链接与中间组件变成
+   普通文件（ENOTDIR）为 `missing`；目录为 `not_file`；符号链接按目标判断
+   （目标存活为普通文件/删除/换成目录分别得到 present/missing/not_file）。
+3. 先定位登记记录再检查记录保存路径：未登记路径无论不存在还是存在普通文件，
+   带不带开关都以退出码 2 失败、标准输出为空、标准错误说明素材未登记并包含
+   规范路径；等价路径写法与符号链接的定位语义保持现状。
+4. 命中记录状态读取发生固定 `PermissionError` 时：退出码 2、标准输出为空、
+   标准错误说明状态读取失败并指出记录保存路径、不含调用栈也不输出部分 JSON；
+   不传 `--check-files` 时相同错误条件下照常成功且无状态字段；未登记路径
+   即使其状态读取会失败，仍按未登记而非状态失败报错。
+5. 只检查命中记录保存路径：其他素材（如 B）状态读取失败不影响查看 A。
+6. 只读：成功与缺失场景前后数据库字节、源文件字节均不变，缺失文件不被重建；
+   标签顺序（demo、ui）与 A、B 的登记顺序不变。
+7. 参数口径：`--check-files` 是 store_true 开关，多位置参数、与 `--tag`
+   同用、空路径等仍退出码 2；空库创建规则保持现状（带开关未登记同样初始化
+   空库后报告未登记）。
+8. 其他命令保持原行为：A 源文件缺失时不带 `--check-files` 的 `query` 仍按
+   登记标签入选且无状态字段；`retag`/`retype` 后带开关查看反映当前类型与
+   标签顺序及 missing 状态。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_acceptance_missing_then_plain_then_not_file_then_present ... ok
+test_equivalent_path_spellings_locate_same_record ... ok
+test_flag_is_store_true_and_unknown_arguments_still_rejected ... ok
+test_fresh_database_created_then_unregistered_reported ... ok
+test_intermediate_component_not_directory_is_missing ... ok
+test_only_hit_record_path_is_checked ... ok
+test_other_commands_unchanged ... ok
+test_present_normal_file_status ... ok
+test_readonly_database_and_source_bytes_unchanged ... ok
+test_status_error_on_hit_record_fails_without_partial_output ... ok
+test_status_error_on_unregistered_path_still_reports_unregistered ... ok
+test_symlink_judged_by_its_target ... ok
+test_tag_order_and_registration_order_preserved ... ok
+test_unregistered_existing_path_rejected_without_status_check ... ok
+test_unregistered_nonexistent_path_rejected_even_with_flag ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in ...s
 
 OK
 ```

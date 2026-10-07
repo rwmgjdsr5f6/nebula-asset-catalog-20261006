@@ -106,6 +106,14 @@ def build_parser():
         "show", help="按素材路径查看单条已登记记录"
     )
     show_parser.add_argument("path", help="已登记素材的路径")
+    show_parser.add_argument(
+        "--check-files",
+        action="store_true",
+        help=(
+            "可选：在登记记录之外追加 file_status 字段，报告记录保存路径"
+            "当前的文件状态（与 query 的状态定义一致）"
+        ),
+    )
     show_parser.set_defaults(handler=handle_show)
 
     retag_parser = subparsers.add_parser(
@@ -536,9 +544,9 @@ def handle_export(args):
 
 def handle_show(args):
     # 路径按 add 的同一规则解析为规范绝对路径：相对路径、. / .. 与解析后
-    # 指向同一登记路径的符号链接都定位同一记录。只反映数据库中的登记内容：
-    # 不读取素材内容，也不检查登记路径当前的文件状态，因此源文件已删除或
-    # 原登记路径变成目录时，通过原路径仍返回该记录。
+    # 指向同一登记路径的符号链接都定位同一记录。默认只反映数据库中的登记
+    # 内容：不读取素材内容，也不检查登记路径当前的文件状态，因此源文件已
+    # 删除或原登记路径变成目录时，通过原路径仍返回该记录。
     if not args.path:
         raise CliError("素材路径不能为空")
     canonical_path = os.path.realpath(args.path)
@@ -550,6 +558,8 @@ def handle_show(args):
             (canonical_path,),
         ).fetchone()
         if row is None:
+            # 未登记路径无论是否在文件系统上存在，一律按未登记失败：
+            # --check-files 只对命中记录生效，不先检查文件状态。
             raise CliError(f"素材未登记: {canonical_path}")
         # 复用 query/export 的同一处记录组装：规范路径、当前类型与按
         # position 升序的完整标签，标签顺序保持不变。
@@ -559,7 +569,17 @@ def handle_show(args):
     finally:
         conn.close()
 
-    # 标准输出仅一行 JSON 对象，只含 path、type、tags；只读，不改动记录。
+    if args.check_files:
+        # 先定位登记记录，再检查记录保存路径的当前状态，状态定义与 query
+        # 完全一致（check_file_status）：普通文件 present，路径不存在、
+        # 断开的链接或中间组件不是目录 missing，目录等非普通文件 not_file，
+        # 符号链接按目标判断。不读取素材内容、不改动源文件或数据库。
+        # 权限或其他系统错误在此抛出 CliError：唯一的 print 在其之后，
+        # 因此失败时标准输出为空、不输出部分 JSON 或调用栈。
+        result["file_status"] = check_file_status(result["path"])
+
+    # 标准输出仅一行 JSON 对象：默认只含 path、type、tags；传入
+    # --check-files 且命中时额外含 file_status。只读，不改动记录。
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 
