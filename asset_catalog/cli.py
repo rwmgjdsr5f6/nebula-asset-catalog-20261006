@@ -77,6 +77,16 @@ def build_parser():
         action="store_true",
         help="为每条结果追加 file_status 字段，报告登记路径当前的文件状态",
     )
+    query_parser.add_argument(
+        "--file-status",
+        choices=("present", "missing", "not_file"),
+        default=None,
+        help=(
+            "只返回当前文件状态为该值的素材：present（普通文件）、"
+            "missing（路径不存在）或 not_file（目录等非普通文件）。"
+            "只接受小写 present、missing 或 not_file"
+        ),
+    )
     query_parser.set_defaults(handler=handle_query)
 
     export_parser = subparsers.add_parser(
@@ -373,10 +383,24 @@ def handle_query(args):
     finally:
         conn.close()
 
-    if args.check_files:
-        # 先完成全部状态检查再输出：任一失败则整次命令报错，不输出部分结果。
-        for record in result:
-            record["file_status"] = check_file_status(record["path"])
+    if args.file_status is not None or args.check_files:
+        # 只对标签与类型条件入选的候选检查状态；先完成全部状态检查再
+        # 筛选与输出：任一失败则整次命令报错，不输出部分结果。
+        statuses = [check_file_status(record["path"]) for record in result]
+        if args.file_status is not None:
+            # --file-status 只改变入选范围：按当前状态过滤候选，
+            # 保持首次登记顺序，每条素材仍只出现一次。
+            kept = [
+                (record, status)
+                for record, status in zip(result, statuses)
+                if status == args.file_status
+            ]
+            result = [record for record, _ in kept]
+            statuses = [status for _, status in kept]
+        if args.check_files:
+            # 与 --file-status 同用时，追加的 file_status 与筛选值一致。
+            for record, status in zip(result, statuses):
+                record["file_status"] = status
     print(json.dumps(result, ensure_ascii=False))
     return EXIT_OK
 
