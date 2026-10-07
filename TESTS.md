@@ -11,6 +11,7 @@
 - `tests/test_query_tag_mode_any_regression.py`：`query --tag-mode any` 任选标签查询（含默认/`all` 交集不变、与 `--type`、`--check-files` 组合及参数错误）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
+- `tests/test_retag_append_regression.py`：`retag --append` 标签追加（保留旧标签、末尾追加、去重与大小写、幂等、原子性与各类错误）的回归测试。
 - `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍保留既有记录、不留部分新标签）。
 - `tests/test_add_write_failure_regression.py`：`add` 写入被数据库约束或触发器拒绝时的失败原因归类回归测试（未登记路径报数据库写入失败而非已登记、整体回滚、撤去条件后恢复成功、真实重复仍拒绝）。
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
@@ -521,6 +522,86 @@ test_unregistered_target_rejected_with_canonical_path ... ok
 
 ----------------------------------------------------------------------
 Ran 13 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。
+
+## retag 标签追加（--append）回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_retag_append_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_retag_append_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`query`/`export` 用于验证持久化结果，测试对象为 `retag --append`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A、B 顺序登记：A 类型 `image`，标签依次为 `demo`、`ui`；
+B 类型 `audio`，标签只有 `demo`。
+
+1. 验收命令 `retag A.bin --append --tag " ui " --tag project --tag demo`：
+   退出码 0、标准错误为空，标准输出仅为含 `path`、`type`、`tags` 的 JSON 对象，
+   A 的标签为 `["demo", "ui", "project"]`，类型与规范路径不变，B 不变；
+   新进程 `export` 仍按 A、B 顺序返回，`query --tag project` 只返回 A，
+   `query --tag demo` 仍返回 A、B 两条。
+2. 追加规则：新标签按输入顺序去除首尾空白并去重，原标签及顺序保留，
+   已存在的标签不移动，新标签接在末尾；比较区分大小写（`ui` 与 `UI` 是两个标签）；
+   重复追加同一批标签仍成功，标签不增加也不重排。
+3. 等价路径写法（相对路径、含 `.` 的写法）定位同一记录；
+   源文件已删除或原路径变成目录仍可追加，操作不读取或改写素材内容。
+4. 不传 `--append` 时仍执行既有完整替换规则。
+5. 缺少素材路径、路径为空、缺少 `--tag`、任一标签为空或只有空白、传入不支持
+   的参数、目标未登记（错误含规范路径）、数据库无法打开或读写、损坏或结构
+   不兼容时：退出码 2、标准输出为空、标准错误说明原因且不含调用栈；
+   参数错误不创建数据库；数据库文件不存在但父目录存在时创建空库后报告未登记，
+   父目录缺失时不补建目录。
+6. 追加中途失败（固定触发器只拒绝 `blocked` 标签写入）时整体回滚：
+   原记录与标签顺序完整保留，不留部分新增标签；撤去拒绝条件后同一命令成功。
+7. `--append` 只属于 `retag`：`add`、`query`、`export` 收到它按参数错误拒绝，
+   既有记录不变。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_append_acceptance_scenario ... ok
+test_append_argument_errors_do_not_create_database ... ok
+test_append_argument_errors_rejected ... ok
+test_append_database_open_and_schema_errors_rejected ... ok
+test_append_deleted_or_directory_source_still_works ... ok
+test_append_does_not_touch_source_file_content ... ok
+test_append_equivalent_path_spellings_resolve_same_record ... ok
+test_append_fresh_database_created_then_unregistered_reported ... ok
+test_append_mid_write_failure_keeps_old_tags_then_recovers ... ok
+test_append_missing_parent_directory_is_not_created ... ok
+test_append_option_rejected_by_other_commands ... ok
+test_append_preserves_order_and_is_case_sensitive ... ok
+test_append_unregistered_target_rejected_with_canonical_path ... ok
+test_repeated_append_is_idempotent ... ok
+test_retag_without_append_still_replaces_all_tags ... ok
+
+----------------------------------------------------------------------
+Ran 15 tests in ...s
 
 OK
 ```

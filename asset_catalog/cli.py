@@ -1,5 +1,5 @@
 """命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）
-与标签替换（retag）。
+与标签替换或追加（retag）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -94,14 +94,19 @@ def build_parser():
     export_parser.set_defaults(handler=handle_export)
 
     retag_parser = subparsers.add_parser(
-        "retag", help="完整替换一条已登记素材的标签"
+        "retag", help="替换或追加一条已登记素材的标签"
     )
     retag_parser.add_argument("path", help="已登记素材的路径")
     retag_parser.add_argument(
         "--tag",
         action="append",
         required=True,
-        help="新标签，可重复传入且至少一个；完整替换旧标签",
+        help="新标签，可重复传入且至少一个；默认完整替换旧标签",
+    )
+    retag_parser.add_argument(
+        "--append",
+        action="store_true",
+        help="保留旧标签并把新标签追加到末尾；不传时完整替换旧标签",
     )
     retag_parser.set_defaults(handler=handle_retag)
 
@@ -432,7 +437,7 @@ def handle_retag(args):
         raise CliError("素材路径不能为空")
     canonical_path = os.path.realpath(args.path)
 
-    # 新标签完整替换旧标签：去除首尾空白、按首次出现顺序去重、保留大小写；
+    # 新标签去除首尾空白、按首次出现顺序去重、保留大小写；
     # 校验在打开数据库之前完成，参数错误不创建数据库。
     tags = normalize_tags(args.tag)
 
@@ -444,6 +449,25 @@ def handle_retag(args):
         if row is None:
             raise CliError(f"素材未登记: {canonical_path}")
         asset_id, asset_type = row
+
+        if args.append:
+            # 追加模式：原标签及顺序保留，已存在的标签（区分大小写）不移动，
+            # 只把新标签接在末尾；重复追加同一批标签结果不变。
+            existing_tags = [
+                tag
+                for (tag,) in conn.execute(
+                    "SELECT tag FROM asset_tag WHERE asset_id = ? "
+                    "ORDER BY position ASC",
+                    (asset_id,),
+                ).fetchall()
+            ]
+            seen = set(existing_tags)
+            merged = list(existing_tags)
+            for tag in tags:
+                if tag not in seen:
+                    seen.add(tag)
+                    merged.append(tag)
+            tags = merged
 
         # 删除旧标签与写入新标签在同一事务中提交：失败时整体回滚，
         # 不新增素材、不改变已有记录，也不留下部分新标签。
@@ -461,7 +485,7 @@ def handle_retag(args):
     finally:
         conn.close()
 
-    # 只替换标签：路径、类型、首次登记顺序与其他素材的记录保持不变。
+    # 只改标签：路径、类型、首次登记顺序与其他素材的记录保持不变。
     print(
         json.dumps(
             {"path": canonical_path, "type": asset_type, "tags": tags},
