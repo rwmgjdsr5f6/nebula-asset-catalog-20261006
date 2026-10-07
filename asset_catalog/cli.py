@@ -111,6 +111,13 @@ def build_parser():
     tags_parser = subparsers.add_parser(
         "tags", help="列出全部已用标签及使用各标签的已登记素材数"
     )
+    tags_parser.add_argument(
+        "--type",
+        help=(
+            "可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写），"
+            "只统计该类型的素材；不传时统计全目录"
+        ),
+    )
     tags_parser.set_defaults(handler=handle_tags)
 
     show_parser = subparsers.add_parser(
@@ -566,18 +573,41 @@ def handle_tags(args):
     # 只统计数据库中当前保存的标签：不读取素材内容、不检查登记路径当前的
     # 文件状态，也不扫描目录，因此源文件已删除或原路径变成目录的素材仍
     # 参与统计；不改动数据库或源文件。
+    #
+    # 可选 --type 与 query 的同一规则处理：去除首尾空白后与登记类型完整
+    # 匹配（区分大小写），接受任意非空文本，不按扩展名推断；校验在打开
+    # 数据库之前完成，参数错误不创建数据库。不传 --type 时统计全目录。
+    asset_type = None
+    if args.type is not None:
+        asset_type = args.type.strip()
+        if not asset_type:
+            raise CliError("素材类型 --type 去除首尾空白后不能为空")
+
     conn = open_database(args.db)
     try:
         # 标签按完整文本分组，区分大小写、不改写标签文本；同一素材的同一
         # 标签只计一次（asset_tag 主键已保证唯一，DISTINCT 使语义显式）。
         # 没有素材使用的标签不在 asset_tag 中，自然不会输出零计数项。
-        rows = conn.execute(
-            """
-            SELECT tag, COUNT(DISTINCT asset_id) AS asset_count
-            FROM asset_tag
-            GROUP BY tag
-            """
-        ).fetchall()
+        # 传入 --type 时只统计该类型素材的标签，无匹配类型时结果为空。
+        if asset_type is None:
+            rows = conn.execute(
+                """
+                SELECT tag, COUNT(DISTINCT asset_id) AS asset_count
+                FROM asset_tag
+                GROUP BY tag
+                """
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                """
+                SELECT t.tag, COUNT(DISTINCT t.asset_id) AS asset_count
+                FROM asset_tag t
+                JOIN asset a ON a.id = t.asset_id
+                WHERE a.type = ?
+                GROUP BY t.tag
+                """,
+                (asset_type,),
+            ).fetchall()
     except sqlite3.Error as exc:
         raise CliError(f"数据库读取失败: {exc}")
     finally:

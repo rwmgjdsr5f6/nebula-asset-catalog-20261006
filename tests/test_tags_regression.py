@@ -13,7 +13,7 @@
   不读取素材内容、不扫描目录，也不改动数据库或素材文件；
 - 数据库文件不存在但父目录存在时创建空目录数据库并输出 []，
   父目录缺失时不补建目录；
-- 缺少 --db、数据库路径为空、tags 传入素材路径或 --tag、--type、
+- 缺少 --db、数据库路径为空、tags 传入素材路径或 --tag、
   --check-files 等不支持的参数、数据库路径指向目录、数据库无法打开或
   内容损坏、表结构不兼容时：退出码 2、标准输出为空、标准错误说明原因
   且不含调用栈；被拒绝的损坏或不兼容数据库字节保持不变；
@@ -233,7 +233,6 @@ class TagsRegressionTest(unittest.TestCase):
         db_before = self.db_path.read_bytes()
         self.assertTagsError(str(self.file_a))
         self.assertTagsError("--tag", "demo")
-        self.assertTagsError("--type", "image")
         self.assertTagsError("--check-files")
         # 参数错误不改动既有数据库。
         self.assertEqual(self.db_path.read_bytes(), db_before)
