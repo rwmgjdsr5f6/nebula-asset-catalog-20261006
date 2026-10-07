@@ -1,5 +1,5 @@
 """命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）
-与标签替换或追加（retag）。
+与标签替换、追加或移除（retag）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -94,7 +94,7 @@ def build_parser():
     export_parser.set_defaults(handler=handle_export)
 
     retag_parser = subparsers.add_parser(
-        "retag", help="替换或追加一条已登记素材的标签"
+        "retag", help="替换、追加或移除一条已登记素材的标签"
     )
     retag_parser.add_argument("path", help="已登记素材的路径")
     retag_parser.add_argument(
@@ -103,10 +103,16 @@ def build_parser():
         required=True,
         help="新标签，可重复传入且至少一个；默认完整替换旧标签",
     )
-    retag_parser.add_argument(
+    retag_mode = retag_parser.add_mutually_exclusive_group()
+    retag_mode.add_argument(
         "--append",
         action="store_true",
         help="保留旧标签并把新标签追加到末尾；不传时完整替换旧标签",
+    )
+    retag_mode.add_argument(
+        "--remove",
+        action="store_true",
+        help="从旧标签中移除指定标签，其余标签保持原顺序；与 --append 互斥",
     )
     retag_parser.set_defaults(handler=handle_retag)
 
@@ -450,9 +456,7 @@ def handle_retag(args):
             raise CliError(f"素材未登记: {canonical_path}")
         asset_id, asset_type = row
 
-        if args.append:
-            # 追加模式：原标签及顺序保留，已存在的标签（区分大小写）不移动，
-            # 只把新标签接在末尾；重复追加同一批标签结果不变。
+        if args.append or args.remove:
             existing_tags = [
                 tag
                 for (tag,) in conn.execute(
@@ -461,6 +465,10 @@ def handle_retag(args):
                     (asset_id,),
                 ).fetchall()
             ]
+
+        if args.append:
+            # 追加模式：原标签及顺序保留，已存在的标签（区分大小写）不移动，
+            # 只把新标签接在末尾；重复追加同一批标签结果不变。
             seen = set(existing_tags)
             merged = list(existing_tags)
             for tag in tags:
@@ -468,6 +476,14 @@ def handle_retag(args):
                     seen.add(tag)
                     merged.append(tag)
             tags = merged
+        elif args.remove:
+            # 移除模式：按完整文本区分大小写移除指定标签，未指定的标签保持
+            # 原顺序；不存在的标签忽略，重复移除结果不变。至少保留一个标签，
+            # 否则整次拒绝且不改动任何记录。
+            remove_set = set(tags)
+            tags = [tag for tag in existing_tags if tag not in remove_set]
+            if not tags:
+                raise CliError("不能移除全部标签：素材至少保留一个标签")
 
         # 删除旧标签与写入新标签在同一事务中提交：失败时整体回滚，
         # 不新增素材、不改变已有记录，也不留下部分新标签。
