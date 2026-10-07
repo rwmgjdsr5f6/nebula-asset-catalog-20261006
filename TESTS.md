@@ -18,6 +18,7 @@
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
 - `tests/test_query_nested_path.py`：`query` 在登记路径的中间组件被替换为普通文件（不再是目录）时，文件状态检查与 `--file-status` 筛选仍把该路径归为 `missing`、目录记录可追溯的回归测试。
 - `tests/test_retype_write_failure_regression.py`：`retype` 类型写入被数据库触发器拒绝时旧记录完整保留、撤去拒绝条件后同一输入成功修改的回归测试。
+- `tests/test_query_exclude_tag_regression.py`：`query --exclude-tag` 按标签排除素材（all/any 范围内排除、去重与大小写、与 `--type`/`--check-files`/`--file-status` 组合、参数错误与其他子命令拒绝）的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -1028,3 +1029,80 @@ OK
 
 重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
 并指出具体差异（退出码、输出、错误信息、持久化记录或素材文件内容）。
+
+## query 按标签排除素材（--exclude-tag）回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_query_exclude_tag_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_query_exclude_tag_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`export` 用于核对登记内容，测试对象为
+  `query` 的 `--exclude-tag` 语义）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A、B、C 顺序登记，三者类型均为 `image`：
+A 标签依次为 `demo`、`ui`；B 标签依次为 `demo`、`archived`；C 只有 `ui`。
+
+1. 验收场景一：`query --tag-mode any --tag demo --tag ui --exclude-tag archived`
+   只按 A、C 的首次登记顺序输出，每条记录仍仅含 `path`、`type`、`tags`，
+   保留规范绝对路径与完整标签顺序。
+2. 验收场景二：`query --tag demo --tag ui --exclude-tag ui` 输出 `[]`——
+   同一标签同时用作命中与排除条件时仍执行排除，不报冲突错误。
+3. 排除条件逐个去除首尾空白、重复条件只生效一次、条件顺序不影响结果；
+   按完整文本区分大小写匹配（`Archived`、`archive` 不排除 B），
+   不存在的排除标签不影响结果。
+4. 排除在 `all`/`any` 及可选 `--type` 确定的范围内生效；与 `--check-files`
+   或 `--file-status` 同用时被排除素材（含源文件已删除的 B）不检查文件状态，
+   剩余范围沿用现有状态规则。
+5. 排除只作用于本次查询：之后不带排除条件的查询与 `export` 结果不变，
+   样例文件内容不变；不传 `--exclude-tag` 时既有查询行为不变。
+6. `--exclude-tag` 缺值、为空或仅有空白（即使其他条件有效）：退出码 2、
+   标准输出为空、标准错误指出该选项且不含调用栈，不创建数据库，
+   既有记录不变；`add`、`export`、`retag`、`retype` 收到该选项同样按
+   参数错误拒绝。
+7. 成功查询退出码均为 0、标准错误为空，标准输出仅为一个 JSON 数组。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_acceptance_all_mode_exclude_overlap_returns_empty ... ok
+test_acceptance_any_mode_excludes_archived ... ok
+test_blank_exclude_tag_leaves_existing_records_intact ... ok
+test_blank_exclude_tag_rejected_without_creating_database ... ok
+test_exclude_applies_after_all_and_any_scope ... ok
+test_exclude_combined_with_type ... ok
+test_exclude_conditions_dedup_order_and_whitespace ... ok
+test_exclude_is_case_sensitive_and_exact ... ok
+test_exclude_tag_rejected_by_other_subcommands ... ok
+test_exclude_tag_rejected_by_other_subcommands_no_database ... ok
+test_excluded_asset_file_status_not_checked ... ok
+test_exclusion_does_not_modify_records_or_files ... ok
+test_without_exclude_tag_behavior_unchanged ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。

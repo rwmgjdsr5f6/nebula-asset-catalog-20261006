@@ -73,6 +73,14 @@ def build_parser():
         help="可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写）",
     )
     query_parser.add_argument(
+        "--exclude-tag",
+        action="append",
+        help=(
+            "排除拥有任一指定标签的素材，可重复传入；逐个去除首尾空白，"
+            "重复条件只生效一次，按完整文本区分大小写匹配"
+        ),
+    )
+    query_parser.add_argument(
         "--check-files",
         action="store_true",
         help="为每条结果追加 file_status 字段，报告登记路径当前的文件状态",
@@ -214,14 +222,14 @@ def verify_schema(conn):
         raise CliError("数据库表结构与本产品不兼容，拒绝覆盖或重建")
 
 
-def normalize_tags(raw_tags):
+def normalize_tags(raw_tags, option="--tag"):
     """去除首尾空白、按首次出现顺序去重；空标签报错。大小写保留。"""
     tags = []
     seen = set()
     for raw in raw_tags:
         tag = raw.strip()
         if not tag:
-            raise CliError("标签 --tag 去除首尾空白后不能为空")
+            raise CliError(f"标签 {option} 去除首尾空白后不能为空")
         if tag not in seen:
             seen.add(tag)
             tags.append(tag)
@@ -361,6 +369,12 @@ def handle_query(args):
     tags = normalize_tags(args.tag)
     tag_mode = args.tag_mode
 
+    # 排除标签同样逐个去除首尾空白并按首次出现顺序去重；只作用于本次查询，
+    # 不修改记录。校验在打开数据库之前完成，参数错误不创建数据库。
+    exclude_tags = []
+    if args.exclude_tag is not None:
+        exclude_tags = normalize_tags(args.exclude_tag, "--exclude-tag")
+
     asset_type = None
     if args.type is not None:
         asset_type = args.type.strip()
@@ -373,6 +387,17 @@ def handle_query(args):
         params = [*tags]
         if asset_type is not None:
             params.append(asset_type)
+        exclude_clause = ""
+        if exclude_tags:
+            # 在既有 all/any 及可选 --type 确定的范围内，排除拥有任一排除
+            # 标签的素材；排除标签按完整文本区分大小写匹配，不存在的排除
+            # 标签不影响结果，与命中条件重叠时仍执行排除。
+            exclude_clause = (
+                "AND a.id NOT IN (SELECT asset_id FROM asset_tag WHERE tag IN ("
+                + ",".join("?" for _ in exclude_tags)
+                + "))"
+            )
+            params.extend(exclude_tags)
         if tag_mode == "all":
             # 素材在命中标签集合中的不同标签数等于条件标签数时，
             # 才同时具备全部标签；每个素材只入选一次。
@@ -389,6 +414,7 @@ def handle_query(args):
             JOIN asset a ON a.id = t.asset_id
             WHERE t.tag IN ({",".join("?" for _ in tags)})
             {type_clause}
+            {exclude_clause}
             GROUP BY a.id
             {having_clause}
             ORDER BY a.id ASC
@@ -403,9 +429,9 @@ def handle_query(args):
         conn.close()
 
     if args.file_status is not None:
-        # 先按标签与类型确定候选，再逐条读取当前状态筛选；未命中标签或
-        # 类型的素材不检查状态。先完成全部状态检查再输出：任一失败则
-        # 整次命令报错，不输出部分结果。
+        # 先按标签、可选类型与排除标签确定候选，再逐条读取当前状态筛选；
+        # 被排除或未命中标签、类型的素材不检查状态。先完成全部状态检查
+        # 再输出：任一失败则整次命令报错，不输出部分结果。
         filtered = []
         for record in result:
             status = check_file_status(record["path"])
