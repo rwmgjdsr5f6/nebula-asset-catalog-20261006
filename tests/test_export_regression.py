@@ -7,6 +7,9 @@
 - 导出全部素材，按首次登记顺序各出现一次，仅含 path、type、tags 三个字段；
 - 标签保留完整集合与登记顺序；空目录输出 []；
 - 源文件删除后记录仍在结果中，且不出现 file_status 字段；
+- --check-files 为每条记录追加 file_status（present / missing / not_file），
+  保留全部记录与首次登记顺序；空目录输出 []；任一记录状态无法判断时
+  整次导出退出码 2、标准输出为空、标准错误说明原因且包含相关路径；
 - 导出不改变登记内容（之后 query --tag demo 结果不变），也不改动素材文件；
 - 数据库文件不存在但父目录存在时创建空目录数据库并输出 []，
   父目录缺失时不补建目录；
@@ -171,7 +174,76 @@ class ExportRegressionTest(unittest.TestCase):
         self.register_samples()
         self.assertExportError("--tag", "demo")
         self.assertExportError("extra-positional")
-        self.assertExportError("--check-files")
+        self.assertExportError("--type", "image")
+        self.assertExportError("--file-status", "present")
+
+    def test_check_files_appends_status_and_keeps_all_records(self):
+        self.register_samples()
+        self.file_b.unlink()
+
+        result = self.run_cli("export", "--check-files")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        # 标准输出仅一行 JSON 数组。
+        self.assertEqual(result.stdout.count("\n"), 1)
+        data = json.loads(result.stdout)
+        self.assertEqual(
+            data,
+            [
+                {**self.expected_a, "file_status": "present"},
+                {**self.expected_b, "file_status": "missing"},
+            ],
+        )
+        # 仍按首次登记顺序各出现一次，缺失文件的记录也保留。
+        self.assertEqual(len(data), 2)
+
+        # 新进程默认导出不含 file_status，也不检查文件状态。
+        data = self.assertExportOk([self.expected_a, self.expected_b])
+        for record in data:
+            self.assertNotIn("file_status", record)
+
+    def test_check_files_reports_directory_as_not_file(self):
+        self.register_samples()
+        self.file_b.unlink()
+        self.file_b.mkdir()
+
+        result = self.run_cli("export", "--check-files")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        data = json.loads(result.stdout)
+        self.assertEqual(data[0]["file_status"], "present")
+        self.assertEqual(data[1]["file_status"], "not_file")
+        # 输出 path 仍保留登记值。
+        self.assertEqual(data[1]["path"], self.expected_b["path"])
+
+    def test_check_files_empty_database_outputs_empty_array(self):
+        fresh = self.tmp_dir / "fresh.sqlite"
+        result = self.run_cli("export", "--check-files", db=fresh)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(json.loads(result.stdout), [])
+
+    @unittest.skipIf(os.geteuid() == 0, "root 不受权限位限制")
+    def test_check_files_status_error_fails_whole_export(self):
+        self.register_samples()
+        locked = self.tmp_dir / "locked"
+        locked.mkdir()
+        locked_file = locked / "c.bin"
+        locked_file.write_text("demo asset C\n", encoding="utf-8")
+        result = self.run_cli(
+            "add", str(locked_file), "--type", "image", "--tag", "locked"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        locked.chmod(0)
+        try:
+            result = self.run_cli("export", "--check-files")
+            self.assertEqual(result.returncode, 2)
+            self.assertEqual(result.stdout, "")
+            self.assertIn("无法确定文件状态", result.stderr)
+            self.assertIn(os.path.realpath(str(locked_file)), result.stderr)
+            self.assertNotIn("Traceback", result.stderr)
+        finally:
+            # 先恢复权限，tearDown 才能清理临时目录。
+            locked.chmod(0o700)
 
     def test_database_path_is_directory_rejected(self):
         target = self.tmp_dir / "a_directory"

@@ -101,6 +101,11 @@ def build_parser():
     export_parser = subparsers.add_parser(
         "export", help="导出完整目录中全部素材的登记元数据"
     )
+    export_parser.add_argument(
+        "--check-files",
+        action="store_true",
+        help="为每条记录追加 file_status 字段，报告登记路径当前的文件状态",
+    )
     export_parser.set_defaults(handler=handle_export)
 
     tags_parser = subparsers.add_parser(
@@ -523,8 +528,9 @@ def handle_query(args):
 
 
 def handle_export(args):
-    # 直接反映目录中的登记记录：不读取素材内容，也不检查登记路径当前的
-    # 文件状态，因此源文件已删除或变为目录都不会漏掉素材。
+    # 直接反映目录中的登记记录：不读取素材内容；不传 --check-files 时也
+    # 不检查登记路径当前的文件状态，因此源文件已删除或变为目录都不会漏掉
+    # 素材。
     conn = open_database(args.db)
     try:
         rows = conn.execute(
@@ -539,6 +545,17 @@ def handle_export(args):
         raise CliError(f"数据库读取失败: {exc}")
     finally:
         conn.close()
+
+    # --check-files 时复用与 query 相同的规则为每条记录追加 file_status：
+    # 保留全部记录及其首次登记顺序，缺失或已变成目录的记录照常输出。
+    # 任一记录因权限或其他系统错误无法判断状态时抛出 CliError，此前不
+    # 输出任何内容，整次导出按退出码 2 失败、不输出部分结果。状态只反映
+    # 当次检查，不写回数据库。
+    result = apply_file_status_rules(
+        result,
+        check_files=args.check_files,
+        status_filter=None,
+    )
 
     # 按首次登记顺序（id 升序）每条素材输出一次；空目录输出 []。
     print(json.dumps(result, ensure_ascii=False))
