@@ -528,6 +528,77 @@ def handle_export(args):
     return EXIT_OK
 
 
+# retag 的三种编辑模式；由互斥开关唯一确定，见 resolve_retag_mode。
+RETAG_MODE_REPLACE = "replace"
+RETAG_MODE_APPEND = "append"
+RETAG_MODE_REMOVE = "remove"
+
+
+def resolve_retag_mode(args):
+    """把命令行开关映射为唯一的编辑模式。
+
+    --append 与 --remove 由 argparse 互斥组保证不会同现；都不传时为默认的
+    完整替换模式。
+    """
+    if args.append:
+        return RETAG_MODE_APPEND
+    if args.remove:
+        return RETAG_MODE_REMOVE
+    return RETAG_MODE_REPLACE
+
+
+def compute_retag_tags(mode, new_tags, existing_tags, canonical_path):
+    """按模式由旧标签与新标签算出结果标签；纯函数，不访问数据库。
+
+    三种模式的结果可直接对照下表核对（new_tags 已去除首尾空白、按首次
+    出现顺序去重并保留大小写；existing_tags 为按登记顺序排列的旧标签，
+    替换模式不使用，可传 None）：
+
+    模式    | 结果标签
+    --------+----------------------------------------------------------
+    replace | 完整替换：结果就是 new_tags 本身，与旧标签无关
+    append  | 保留旧标签及顺序，已存在的标签（区分大小写）不移动，
+            | 只把尚不存在的新标签按顺序接到末尾；重复追加结果不变
+    remove  | 按完整文本区分大小写移除 new_tags 中的标签（重复条件只
+            | 生效一次，不存在的标签忽略），其余标签保持原顺序；
+            | 若一个都不剩则抛出 CliError，整次拒绝、不改动任何记录
+
+    返回的是新列表，不修改入参；canonical_path 仅用于移除全部标签时的
+    错误信息。
+    """
+    if mode == RETAG_MODE_APPEND:
+        seen = set(existing_tags)
+        merged = list(existing_tags)
+        for tag in new_tags:
+            if tag not in seen:
+                seen.add(tag)
+                merged.append(tag)
+        return merged
+    if mode == RETAG_MODE_REMOVE:
+        remove_set = set(new_tags)
+        remaining = [tag for tag in existing_tags if tag not in remove_set]
+        if not remaining:
+            # 素材至少保留一个标签：整次拒绝，不改动任何记录。
+            raise CliError(f"不能移除素材的全部标签: {canonical_path}")
+        return remaining
+    # 替换模式：结果就是规范化后的新标签，与旧标签无关。
+    return list(new_tags)
+
+
+def replace_asset_tags(conn, asset_id, tags):
+    """把一条素材的标签整体替换为 tags（按列表顺序写入 position）。
+
+    删除旧标签与写入新标签只在此处发生，且都在调用方持有的同一事务中：
+    本函数不提交也不回滚，调用方在成功后 commit、失败时 rollback，
+    因此写入中途失败不会留下部分新标签，旧标签及顺序完整保留。
+    """
+    conn.execute("DELETE FROM asset_tag WHERE asset_id = ?", (asset_id,))
+    conn.executemany(
+        "INSERT INTO asset_tag(asset_id, tag, position) VALUES (?, ?, ?)",
+        [(asset_id, tag, position) for position, tag in enumerate(tags)],
+    )
+
+
 def handle_retag(args):
     # 路径按 add 的同一规则解析为规范绝对路径，等价写法定位同一记录；
     # 不要求源文件当前存在或仍是普通文件，已删除或变成目录也可改标签。
@@ -538,6 +609,7 @@ def handle_retag(args):
     # 新标签去除首尾空白、按首次出现顺序去重、保留大小写；
     # 校验在打开数据库之前完成，参数错误不创建数据库。
     tags = normalize_tags(args.tag)
+    mode = resolve_retag_mode(args)
 
     conn = open_database(args.db)
     try:
@@ -548,7 +620,9 @@ def handle_retag(args):
             raise CliError(f"素材未登记: {canonical_path}")
         asset_id, asset_type = row
 
-        if args.append or args.remove:
+        # 追加与移除以旧标签为输入；替换模式与旧标签无关，不再读取。
+        existing_tags = None
+        if mode != RETAG_MODE_REPLACE:
             existing_tags = [
                 tag
                 for (tag,) in conn.execute(
@@ -558,35 +632,13 @@ def handle_retag(args):
                 ).fetchall()
             ]
 
-        if args.append:
-            # 追加模式：原标签及顺序保留，已存在的标签（区分大小写）不移动，
-            # 只把新标签接在末尾；重复追加同一批标签结果不变。
-            seen = set(existing_tags)
-            merged = list(existing_tags)
-            for tag in tags:
-                if tag not in seen:
-                    seen.add(tag)
-                    merged.append(tag)
-            tags = merged
-        elif args.remove:
-            # 移除模式：待移除标签已去重（重复条件只生效一次），按完整文本
-            # 区分大小写匹配；未指定的标签保持原顺序，不存在的标签忽略。
-            remove_set = set(tags)
-            remaining = [tag for tag in existing_tags if tag not in remove_set]
-            if not remaining:
-                # 素材至少保留一个标签：整次拒绝，不改动任何记录。
-                raise CliError(f"不能移除素材的全部标签: {canonical_path}")
-            tags = remaining
+        # 结果标签由纯函数算出：三种模式的结果规则集中在
+        # compute_retag_tags 一处，可直接对照其文档表核对。
+        final_tags = compute_retag_tags(mode, tags, existing_tags, canonical_path)
 
         # 删除旧标签与写入新标签在同一事务中提交：失败时整体回滚，
         # 不新增素材、不改变已有记录，也不留下部分新标签。
-        conn.execute(
-            "DELETE FROM asset_tag WHERE asset_id = ?", (asset_id,)
-        )
-        conn.executemany(
-            "INSERT INTO asset_tag(asset_id, tag, position) VALUES (?, ?, ?)",
-            [(asset_id, tag, position) for position, tag in enumerate(tags)],
-        )
+        replace_asset_tags(conn, asset_id, final_tags)
         conn.commit()
     except sqlite3.Error as exc:
         conn.rollback()
@@ -597,7 +649,7 @@ def handle_retag(args):
     # 只改标签：路径、类型、首次登记顺序与其他素材的记录保持不变。
     print(
         json.dumps(
-            {"path": canonical_path, "type": asset_type, "tags": tags},
+            {"path": canonical_path, "type": asset_type, "tags": final_tags},
             ensure_ascii=False,
         )
     )
