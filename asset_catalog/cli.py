@@ -111,17 +111,25 @@ def open_database(db_path):
         # 缺父目录、路径为目录、无权限等情况在此处或首次 I/O 时报错。
         conn = sqlite3.connect(db_path)
         rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
+            "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view')"
         ).fetchall()
     except sqlite3.Error as exc:
         raise CliError(f"无法打开数据库 {db_path}: {exc}")
 
-    table_names = {row[0] for row in rows}
+    table_names = {row[0] for row in rows if row[1] == "table"}
+    view_names = {row[0] for row in rows if row[1] == "view"}
     internal = {"sqlite_sequence"}
     user_tables = table_names - internal
 
     try:
         if not user_tables:
+            # 视图可以独立返回常量而不依赖任何表：没有用户表但存在用户
+            # 视图的文件仍可能承载其他业务内容，不能当作空库初始化，
+            # 即使视图名为 asset 或 asset_tag 也按同一规则拒绝。
+            if view_names:
+                raise CliError(
+                    f"数据库 {db_path} 结构不属于本产品，拒绝覆盖或重建"
+                )
             create_schema(conn)
         elif "asset" in table_names and "asset_tag" in table_names:
             verify_schema(conn)
