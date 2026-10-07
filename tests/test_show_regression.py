@@ -235,12 +235,23 @@ class ShowRegressionTest(unittest.TestCase):
         self.assertShowError(str(self.file_a), str(self.file_b))
         # show 不接受标签或其他子命令的选项。
         self.assertShowError(str(self.file_a), "--tag", "demo")
-        self.assertShowError(str(self.file_a), "--check-files")
+        self.assertShowError(str(self.file_a), "--file-status", "present")
         self.assertShowError(str(self.file_a), "--type", "image")
         self.assertShowError(str(self.file_a), "--append")
         self.assertShowError("--unknown-option", str(self.file_a))
         # 素材路径为空字符串。
         self.assertShowError("")
+
+        # --check-files 是 show 的合法可选开关：源文件存在时命中记录并
+        # 追加 present；其文件状态专项行为见
+        # tests/test_show_file_status_regression.py。
+        result = self.run_show(str(self.file_a), "--check-files")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            json.loads(result.stdout),
+            {**self.expected_a, "file_status": "present"},
+        )
 
         # 全部失败不改变已有记录。
         self.assertExport([self.expected_a, self.expected_b])

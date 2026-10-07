@@ -12,6 +12,7 @@
 - `tests/test_query_exclude_tag_regression.py`：`query --exclude-tag` 按标签排除素材（含 all/any 与 `--type`、命中与排除同标签、与 `--check-files`/`--file-status` 组合、参数错误与其他子命令拒绝）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_show_regression.py`：`show` 按路径查看单条记录（验收命令、等价路径与符号链接、源文件删除或变目录、未登记、参数与数据库错误、导出顺序不变）的回归测试。
+- `tests/test_show_file_status_regression.py`：`show --check-files` 单条记录文件状态查看（missing/not_file/present 验收序列、断链与中间组件、未登记与权限错误、只读与其他素材状态无关）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
 - `tests/test_retag_append_regression.py`：`retag --append` 标签追加（保留旧标签、末尾追加、去重与大小写、幂等、原子性与各类错误）的回归测试。
 - `tests/test_retag_remove_regression.py`：`retag --remove` 标签移除（保留顺序、区分大小写、幂等、至少保留一个标签、与 `--append` 互斥、原子性与各类错误）的回归测试。
@@ -579,9 +580,11 @@ python tests/test_show_regression.py
 5. `retag`、`retype` 之后 `show` 反映当前保存的类型与完整标签，标签顺序
    不变；其他素材不受影响。
 6. 缺少素材路径或 `--db`、素材或数据库路径为空字符串、传入不支持的参数
-   （多余位置参数、`--tag`、`--type`、`--check-files`、`--append`、未知
+   （多余位置参数、`--tag`、`--type`、`--file-status`、`--append`、未知
    选项）：退出码 2、标准输出为空、标准错误指出对应参数及原因且不含调用栈；
-   参数错误不创建数据库。
+   参数错误不创建数据库。`--check-files` 现为 show 的合法可选开关，源文件
+   存在时命中记录并追加 `present`，其文件状态专项行为见
+   `test_show_file_status_regression.py`。
 7. 数据库文件不存在但父目录存在时沿用空库创建规则后报告未登记，新进程
    `export` 该库得到 `[]`；父目录缺失时报错且不补建目录。
 8. 数据库路径指向目录、非 SQLite 文件、含其他业务表的 SQLite 文件、
@@ -621,6 +624,92 @@ OK
 ```
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。
+
+## show --check-files 单条记录文件状态回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_show_file_status_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_show_file_status_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`export` 用于核对登记内容不变，测试对象为
+  `show --check-files`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材；
+  验收命令在临时演示目录中以相对路径 `A.bin` 执行。
+- 权限错误通过子进程内对指定路径的 `os.stat` 确定性注入
+  `PermissionError` 复现，不依赖系统权限配置；符号链接用例在环境不支持时
+  自行跳过。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A.bin、B.bin 顺序登记：A 类型 `image`，标签依次为 `demo`、
+`ui`；B 类型 `audio`，标签只有 `music`。
+
+1. 验收序列：登记后删除 A.bin，在演示目录执行
+   `show A.bin --check-files` 返回原规范路径、`image`、`["demo", "ui"]` 与
+   `file_status="missing"`，退出码 0、标准错误为空、标准输出仅一行四键 JSON；
+   随后 `show A.bin` 返回相同元数据且没有状态字段；原位置换成目录后带选项
+   查看返回 `not_file`；恢复普通文件后返回 `present`，无需重新登记；全程
+   `export` 的路径、类型、标签与 A、B 登记顺序不变。
+2. 普通文件存在时为 `present`；`--check-files` 放在路径前后语义一致；
+   连续查看即时反映当前状态，不保存历史状态。
+3. 登记路径的中间组件被替换为普通文件（不再是目录）时为 `missing`，记录仍
+   按其登记的规范路径命中；不带选项时照常返回记录。
+4. 断开的符号链接按链接目标解析：目标规范路径未登记时按未登记失败
+   （标准错误含目标规范路径）；登记路径处替换为指向另一条已登记普通文件的
+   符号链接时，定位到目标记录并按目标报告 `present`，输出目标保存的规范
+   路径。
+5. 未登记路径无论文件是否存在都退出码 2、标准输出为空，标准错误说明素材
+   未登记并包含规范路径，不返回其文件状态。
+6. 对命中记录保存路径注入 `PermissionError`：退出码 2、标准输出为空，
+   标准错误包含“无法确定文件状态”与相关路径、不含调用栈、不输出部分 JSON；
+   失败后不带选项的 show 元数据不变。
+7. 其他素材的文件状态（删除、变目录）不影响本次查看；查看不读取素材内容、
+   不改写源文件或数据库字节，不改变标签顺序与登记顺序。
+8. 参数合法、父目录存在时先创建空库再报告未登记；父目录缺失时报错且不补建
+   目录——口径与不带选项一致。
+
+### 成功结果
+
+成功时输出 `OK`，13 个用例全部通过：
+
+```
+test_acceptance_missing_then_plain_then_not_file_then_present ... ok
+test_broken_symlink_at_registered_path_locates_nothing ... ok
+test_check_files_is_readonly_against_database_and_source ... ok
+test_flag_before_path_works_like_flag_after ... ok
+test_fresh_database_created_then_unregistered_reported ... ok
+test_intermediate_component_replaced_with_file_reports_missing ... ok
+test_missing_parent_directory_is_not_created ... ok
+test_other_assets_state_does_not_affect_this_show ... ok
+test_permission_error_fails_without_partial_output ... ok
+test_present_for_existing_regular_file ... ok
+test_repeated_check_files_reflects_current_state ... ok
+test_symlink_to_another_registered_file_locates_target_record ... ok
+test_unregistered_path_rejected_whether_file_exists_or_not ... ok
+
+----------------------------------------------------------------------
+Ran 13 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一断言失败时 unittest 以非零退出码退出，
 并指出对应场景。
 
 ## retag 标签替换回归测试（新增）
