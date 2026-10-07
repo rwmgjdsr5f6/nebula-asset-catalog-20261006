@@ -12,6 +12,7 @@
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
 - `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍保留既有记录、不留部分新标签）。
+- `tests/test_retag_append_regression.py`：`retag --append` 标签追加（保留旧标签、末尾追加、幂等、大小写敏感、原子性与各类错误）的回归测试。
 - `tests/test_add_write_failure_regression.py`：`add` 写入被数据库约束或触发器拒绝时的失败原因归类回归测试（未登记路径报数据库写入失败而非已登记、整体回滚、撤去条件后恢复成功、真实重复仍拒绝）。
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
 
@@ -720,3 +721,58 @@ OK
 
 重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
 并指出具体差异（退出码、输出、错误信息、文件字节或视图查询结果）。
+
+## retag --append 标签追加回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_retag_append_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_retag_append_regression.py
+```
+
+### 覆盖内容
+
+固定场景：两个临时演示文件按 A.bin、B.bin 顺序登记——A 类型 `image`、
+标签依次为 `demo`、`ui`；B 类型 `audio`、标签 `demo`。
+
+1. 验收主场景：`retag A.bin --append --tag " ui " --tag project --tag demo`
+   退出码 0、标准错误为空，标准输出仅为含 `path`、`type`、`tags` 的 JSON
+   对象，A 的标签为 `["demo", "ui", "project"]`（已存在标签不移动，新标签
+   接在末尾）；重复相同命令仍成功且标签不增加、不重排；新进程 `export`
+   仍按 A、B 顺序返回，`query --tag project` 只返回 A，`query --tag demo`
+   仍返回两条素材。
+2. 大小写敏感：`ui` 与 `UI` 是两个标签，追加 `UI` 接在末尾，再追加 `ui`
+   不增加也不移动。
+3. 输入内去重：同一命令中重复的新标签按首次出现顺序只保留一个。
+4. 等价路径（含 `.` 与 `..` 的写法）定位同一记录。
+5. 源文件已删除或原路径变成目录时仍能追加；素材文件内容始终不变。
+6. 不带 `--append` 时仍执行既有完整替换规则。
+7. 追加写入中途失败（固定触发器只拒绝 `blocked` 标签写入）时整体回滚：
+   原记录与标签顺序完整保留、不留部分新增标签；撤去条件后相同命令成功。
+8. 错误路径：缺少素材路径、缺少 `--tag`、标签为空白、传入不支持的参数、
+   目标未登记（标准错误含规范路径）、父目录缺失（不补建目录）均为退出码
+   2、标准输出为空、标准错误说明原因且不含调用栈；参数错误不创建数据库；
+   数据库不存在但父目录存在时创建空库后报告未登记。
+9. `--append` 只属于 `retag`：`add` / `query` / `export` 收到它按参数错误
+   拒绝，既有记录不受影响。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_append_acceptance_scenario ... ok
+test_append_is_case_sensitive ... ok
+...
+Ran 12 tests in ...s
+
+OK
+```
