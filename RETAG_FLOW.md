@@ -9,21 +9,21 @@ SQLite 结构均未改变。
 
 ```
 python -m asset_catalog --db DB retag PATH --tag T... [--append | --remove]
-        │  asset_catalog/__main__.py → cli.py: main()（cli.py:715）
+        │  asset_catalog/__main__.py → cli.py: main()（cli.py:751）
         ▼
 argparse 解析：--append 与 --remove 互斥（build_parser，cli.py:34），
 同时出现或参数不支持时退出码 2、标准输出为空、不创建数据库
         ▼
-handle_retag（cli.py:610）按顺序编排下列步骤：
+handle_retag（cli.py:646）按顺序编排下列步骤：
   ① 路径规范化为规范绝对路径（os.path.realpath，与 add 同一规则）
-  ② normalize_tags（cli.py:226）：去首尾空白、按首次出现顺序去重、
+  ② normalize_tags（cli.py:232）：去首尾空白、按首次出现顺序去重、
      保留大小写；空标签报错。①② 均在打开数据库之前，参数错误不建库
-  ③ resolve_retag_mode（cli.py:537）：把互斥开关归并为模式字符串
-  ④ open_database（cli.py:140）：打开/创建并校验结构
+  ③ resolve_retag_mode（cli.py:573）：把互斥开关归并为模式字符串
+  ④ open_database（cli.py:146）：打开/创建并校验结构
   ⑤ 按规范路径定位素材；未登记报错（错误含规范路径）
-  ⑥ fetch_current_tags（cli.py:585）：仅 append / remove 读取旧标签
-  ⑦ compute_retag_tags（cli.py:551）：纯函数算出最终标签列表
-  ⑧ rewrite_tags（cli.py:597）+ commit：同一事务删除旧标签、写入新标签
+  ⑥ fetch_current_tags（cli.py:621）：仅 append / remove 读取旧标签
+  ⑦ compute_retag_tags（cli.py:587）：纯函数算出最终标签列表
+  ⑧ rewrite_tags（cli.py:633）+ commit：同一事务删除旧标签、写入新标签
         ▼
 标准输出仅一行 JSON：{"path": ..., "type": ..., "tags": [...]}，退出码 0
 ```
@@ -31,7 +31,7 @@ handle_retag（cli.py:610）按顺序编排下列步骤：
 任何阶段抛出 `CliError` 都由 `main()` 统一收敛：标准错误单行
 `asset_catalog: 错误: <原因>`（不含调用栈），退出码 2，标准输出为空。
 
-## 2. 三种模式的标签结果：compute_retag_tags（cli.py:551）
+## 2. 三种模式的标签结果：compute_retag_tags（cli.py:587）
 
 最终标签列表由这一个纯函数决定，不触碰数据库，可脱离数据库单独核对
 （`new_tags` 是 `normalize_tags` 去重后的输入，`existing_tags` 是
@@ -57,7 +57,7 @@ handle_retag（cli.py:610）按顺序编排下列步骤：
   `open_database` 先创建空库再报告未登记，父目录缺失时不补建目录。
 - **数据库打不开、损坏、结构不兼容**：`open_database` 按既有口径拒绝，
   不覆盖原库。
-- **写入中途失败**：`rewrite_tags`（cli.py:597）的 DELETE 与 INSERT 与
+- **写入中途失败**：`rewrite_tags`（cli.py:633）的 DELETE 与 INSERT 与
   `handle_retag` 的 `conn.commit()` 构成同一事务；任一步抛出
   `sqlite3.Error` 时 `handle_retag` 整体 `rollback`，旧标签及顺序完整
   保留，不留下部分新标签，也不新增素材或改变其他记录。
