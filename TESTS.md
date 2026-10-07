@@ -17,6 +17,7 @@
 - `tests/test_add_write_failure_regression.py`：`add` 写入被数据库约束或触发器拒绝时的失败原因归类回归测试（未登记路径报数据库写入失败而非已登记、整体回滚、撤去条件后恢复成功、真实重复仍拒绝）。
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
 - `tests/test_query_nested_path.py`：`query` 在登记路径的中间组件被替换为普通文件（不再是目录）时，文件状态检查与 `--file-status` 筛选仍把该路径归为 `missing`、目录记录可追溯的回归测试。
+- `tests/test_retype_write_failure_regression.py`：`retype` 类型写入被数据库触发器拒绝时旧记录完整保留、撤去拒绝条件后同一输入成功修改的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -962,3 +963,68 @@ OK
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
 并打印预期值与实际值的差异。
+
+## retype 类型写入失败回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行（验收入口）：
+
+```sh
+python -m unittest discover -s tests -p test_retype_write_failure_regression.py -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_retype_write_failure_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用：
+  `add` 仅用于准备样例，`query`/`export` 用于核对持久化结果，测试对象为
+  `retype` 类型写入被数据库拒绝时的行为。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖外部素材、权限差异、
+  网络或第三方库（仅用 Python 3 标准库）。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 固定场景与预期
+
+样例只含两个临时演示文件，按 A.bin、B.bin 顺序登记：A 类型 `image`、
+标签依次为 `demo`、`ui`；B 类型 `audio`、标签只有 `demo`。
+
+1. 样例库保留原有兼容表结构（`asset`、`asset_tag` 及索引）和正常读取
+   功能；仅附加一个 BEFORE UPDATE 触发器作为固定拒绝条件：拒绝把类型
+   更新为 `texture`，拒绝文本固定为 `retype blocked`，其他类型与读取
+   不受影响。
+2. 用 `retype` 对 A 的登记路径提交 `--type texture`：更新被触发器拒绝。
+   预期**退出码 2、标准输出为空**，标准错误为单行，说明数据库读写失败
+   并包含 `retype blocked`，且**不含调用栈**。
+3. 失败后由**新进程**核对：`export` 仍按 A、B 的登记顺序返回原记录，
+   规范绝对路径、类型与标签顺序均不变；`query --tag demo --type image`
+   只返回 A，改为 `--type texture` 时返回 `[]`；不带类型的 `demo`
+   查询仍按登记顺序返回 A、B；两个源文件字节保持不变。
+4. 在同一场景撤去拒绝条件（DROP TRIGGER），用**同一输入**再次提交：
+   退出码 0、标准错误为空，标准输出仅为含 `path`、`type`、`tags` 的
+   A 记录，类型为 `texture`，标签仍为 `["demo", "ui"]`。
+5. 由**新进程**导出仍按 A、B 顺序返回，只有 A 的类型变化，B 保持原样；
+   按 `demo` 和 `texture` 查询只命中 A，按 `demo` 和 `image` 查询返回
+   `[]`；两次操作均不改写两个源文件的字节内容。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_retype_blocked_keeps_old_record_then_succeeds_when_condition_removed ... ok
+
+----------------------------------------------------------------------
+Ran 1 tests in ...s
+
+OK
+```
+
+重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
+并指出具体差异（退出码、输出、错误信息、持久化记录或素材文件内容）。
