@@ -13,10 +13,13 @@
   不读取素材内容、不扫描目录，也不改动数据库或素材文件；
 - 数据库文件不存在但父目录存在时创建空目录数据库并输出 []，
   父目录缺失时不补建目录；
-- 缺少 --db、数据库路径为空、tags 传入素材路径或 --tag、--type、
-  --check-files 等不支持的参数、数据库路径指向目录、数据库无法打开或
+- 缺少 --db、数据库路径为空、tags 传入素材路径或 --tag、
+  --check-files 等不支持的参数、--type 缺值/为空/只有空白、
+  数据库路径指向目录、数据库无法打开或
   内容损坏、表结构不兼容时：退出码 2、标准输出为空、标准错误说明原因
   且不含调用栈；被拒绝的损坏或不兼容数据库字节保持不变；
+- --type 按类型筛选统计：类型去除首尾空白后与登记类型完整匹配
+  （区分大小写），只统计该类型素材的标签；无匹配类型输出 []；
 - 读取失败时不输出部分数组。
 
 每个用例使用独立的临时目录与数据库，只创建/清理自己的样例文件。
@@ -91,8 +94,8 @@ class TagsRegressionTest(unittest.TestCase):
         self.assertEqual(result_b.returncode, 0, result_b.stderr)
         self.assertEqual(result_b.stderr, "")
 
-    def assertTagsOk(self, expected, db=None):
-        result = self.run_cli("tags", db=db)
+    def assertTagsOk(self, expected, db=None, *args):
+        result = self.run_cli("tags", *args, db=db)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stderr, "")
         # 标准输出仅为一行 JSON 数组。
@@ -223,6 +226,128 @@ class TagsRegressionTest(unittest.TestCase):
         # 由新进程再次读取同一空库，结论一致。
         self.assertTagsOk([], db=fresh)
 
+    def register_typed_samples(self):
+        """按验收顺序登记 A（image: demo, ui）、B（audio: demo, sound）
+        与 C（image: demo, UI）。"""
+        file_c = self.tmp_dir / "C.bin"
+        file_c.write_text("demo asset C\n", encoding="utf-8")
+        samples = [
+            (self.file_a, "image", ("demo", "ui")),
+            (self.file_b, "audio", ("demo", "sound")),
+            (file_c, "image", ("demo", "UI")),
+        ]
+        for path, asset_type, tags in samples:
+            cmd = ["add", str(path), "--type", asset_type]
+            for tag in tags:
+                cmd += ["--tag", tag]
+            result = self.run_cli(*cmd)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+        return file_c
+
+    def test_tags_type_filters_by_exact_type(self):
+        # 验收场景：A 为 image（demo、ui），B 为 audio（demo、sound），
+        # C 为 image（demo、UI）；tags --type image 依次为 UI 计 1、
+        # demo 计 2、ui 计 1，audio 的 sound 不参与。
+        self.register_typed_samples()
+        self.assertTagsOk(
+            [
+                {"tag": "UI", "asset_count": 1},
+                {"tag": "demo", "asset_count": 2},
+                {"tag": "ui", "asset_count": 1},
+            ],
+            None,
+            "--type",
+            "image",
+        )
+        # 不带 --type 时保留原有全目录统计。
+        self.assertTagsOk(
+            [
+                {"tag": "UI", "asset_count": 1},
+                {"tag": "demo", "asset_count": 3},
+                {"tag": "sound", "asset_count": 1},
+                {"tag": "ui", "asset_count": 1},
+            ]
+        )
+
+    def test_tags_type_strips_surrounding_whitespace(self):
+        # 类型值去除首尾空白后匹配：" image " 与 image 等价。
+        self.register_typed_samples()
+        self.assertTagsOk(
+            [
+                {"tag": "UI", "asset_count": 1},
+                {"tag": "demo", "asset_count": 2},
+                {"tag": "ui", "asset_count": 1},
+            ],
+            None,
+            "--type",
+            " image ",
+        )
+
+    def test_tags_type_case_sensitive_and_unmatched_outputs_empty(self):
+        self.register_typed_samples()
+        # 完整匹配且区分大小写：Image 不匹配 image。
+        self.assertTagsOk([], None, "--type", "Image")
+        # 无匹配类型成功输出 []，退出码 0、标准错误为空。
+        self.assertTagsOk([], None, "--type", "video")
+
+    def test_tags_type_empty_database_outputs_empty_array(self):
+        # 空目录搭配 --type：沿用空库创建规则并输出 []。
+        fresh = self.tmp_dir / "fresh.sqlite"
+        self.assertFalse(fresh.exists())
+        self.assertTagsOk([], fresh, "--type", "image")
+        self.assertTrue(fresh.exists())
+
+    def test_tags_type_reflects_retype_and_retag(self):
+        file_c = self.register_typed_samples()
+
+        # retype 把 B 改为 image 后，sound 进入 image 统计。
+        result = self.run_cli("retype", str(self.file_b), "--type", "image")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTagsOk(
+            [
+                {"tag": "UI", "asset_count": 1},
+                {"tag": "demo", "asset_count": 3},
+                {"tag": "sound", "asset_count": 1},
+                {"tag": "ui", "asset_count": 1},
+            ],
+            None,
+            "--type",
+            "image",
+        )
+
+        # retag 从 C 移除 UI 后，image 统计中不再出现 UI。
+        result = self.run_cli(
+            "retag", str(file_c), "--remove", "--tag", "UI"
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTagsOk(
+            [
+                {"tag": "demo", "asset_count": 3},
+                {"tag": "sound", "asset_count": 1},
+                {"tag": "ui", "asset_count": 1},
+            ],
+            None,
+            "--type",
+            "image",
+        )
+
+    def test_tags_type_missing_or_blank_value_rejected(self):
+        self.register_samples()
+        db_before = self.db_path.read_bytes()
+        # --type 缺值（argparse 拒绝）。
+        self.assertTagsError("--type")
+        # --type 为空或只有空白。
+        self.assertTagsError("--type", "")
+        self.assertTagsError("--type", "   ")
+        # 参数错误不改动既有数据库。
+        self.assertEqual(self.db_path.read_bytes(), db_before)
+
+    def test_tags_type_blank_value_does_not_create_database(self):
+        fresh = self.tmp_dir / "fresh.sqlite"
+        self.assertTagsError("--type", "  ", db=fresh)
+        self.assertFalse(fresh.exists())
+
     def test_missing_parent_directory_is_not_created(self):
         missing = self.tmp_dir / "no" / "such" / "catalog.sqlite"
         self.assertTagsError(db=missing)
@@ -233,7 +358,6 @@ class TagsRegressionTest(unittest.TestCase):
         db_before = self.db_path.read_bytes()
         self.assertTagsError(str(self.file_a))
         self.assertTagsError("--tag", "demo")
-        self.assertTagsError("--type", "image")
         self.assertTagsError("--check-files")
         # 参数错误不改动既有数据库。
         self.assertEqual(self.db_path.read_bytes(), db_before)
