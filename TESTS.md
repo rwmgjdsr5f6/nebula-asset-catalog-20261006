@@ -16,6 +16,7 @@
 - `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍保留既有记录、不留部分新标签）。
 - `tests/test_add_write_failure_regression.py`：`add` 写入被数据库约束或触发器拒绝时的失败原因归类回归测试（未登记路径报数据库写入失败而非已登记、整体回滚、撤去条件后恢复成功、真实重复仍拒绝）。
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
+- `tests/test_query_nested_path.py`：`query` 在登记路径的中间组件被替换为普通文件（不再是目录）时，文件状态检查与 `--file-status` 筛选仍把该路径归为 `missing`、目录记录可追溯的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -891,3 +892,73 @@ OK
 
 重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
 并指出具体差异（退出码、输出、错误信息、文件字节或视图查询结果）。
+
+## query 中间组件被替换为普通文件时的文件状态回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_query_nested_path -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_query_nested_path.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`export` 用于核对登记元数据，测试对象为
+  `query` 的文件状态检查与 `--file-status` 筛选）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材，
+  重复执行不依赖上次残留文件。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 固定场景与预期
+
+固定样例只含两条素材，按 A、B 顺序登记：两者类型均为 `image`，
+标签顺序均为 `demo`、`ui`。A 位于临时目录的 `nested/a.bin`，
+B 位于同一临时目录的 `b.bin`。登记后移除 A 及其父目录 `nested`，
+再在 `nested` 原位置创建一个普通文件（路径中间组件被替换为非目录），
+B 保持原样。
+
+1. `query --tag demo --check-files` 按登记顺序返回 A、B 两条记录：
+   A 的 `file_status` 为 `missing`（中间组件不是目录按 `missing` 归类，
+   不判为 `not_file`，也不构成查询错误），B 为 `present`；
+   每条记录的规范绝对路径、类型与完整标签顺序与登记结果一致。
+2. `query --tag demo --file-status missing` 只返回 A 的原元数据，
+   不附加 `file_status` 字段；追加 `--check-files` 后仍只返回 A，
+   并附加 `missing`。
+3. 中间组件被替换期间，不带状态选项的 `query --tag demo`
+   仍返回原有 A、B 两条记录，且不含 `file_status`。
+4. 恢复 `nested` 目录及 `a.bin`（不重新登记）后，由**新进程**执行
+   `--file-status missing` 筛选得到 `[]`；带 `--check-files` 的标签查询中
+   两条素材均显示 `present`。
+5. 以上查询退出码均为 0、标准错误为空、标准输出仅为一个 JSON 数组。
+6. 各次查询不改变登记元数据（前后 `export` 结果一致、数据库文件字节不变），
+   不改写 B 或替代目录的普通文件内容。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_check_files_marks_a_missing_b_present ... ok
+test_file_status_missing_filter_with_and_without_check_files ... ok
+test_plain_tag_query_unchanged_while_nested_replaced ... ok
+test_queries_do_not_modify_metadata_or_sample_files ... ok
+test_restore_nested_dir_reports_present_in_fresh_process ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并打印预期值与实际值的差异。
