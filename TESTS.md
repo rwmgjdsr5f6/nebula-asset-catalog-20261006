@@ -13,6 +13,7 @@
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
 - `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍保留既有记录、不留部分新标签）。
 - `tests/test_add_write_failure_regression.py`：`add` 写入被数据库约束或触发器拒绝时的失败原因归类回归测试（未登记路径报数据库写入失败而非已登记、整体回滚、撤去条件后恢复成功、真实重复仍拒绝）。
+- `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -639,24 +640,83 @@ python tests/test_add_write_failure_regression.py
    登记：退出码 0、标准错误为空，标准输出是仅含 `path`、`type`、`tags`
    的单条 JSON 记录，标签为 `["project", "blocked"]`；新进程导出按首次
    登记顺序返回 A、B，各一次。
-4. 真实重复：恢复成功后以绝对路径、含 `.` / `..` 的等价写法再次登记 B，
-   仍按既有重复规则拒绝（退出码 2、标准输出为空、标准错误说明重复登记
-   并含冲突的规范绝对路径，无调用栈），原记录不被替换。
+重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
+并指出具体差异（退出码、输出、错误信息、持久化记录或素材文件内容）。
+
+## 视图库拒绝与空库初始化回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行（验收入口）：
+
+```sh
+python -m unittest tests.test_view_database_rejection_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_view_database_rejection_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用。
+- 每个用例使用 `tempfile` 在项目根目录下创建**独立的临时样例文件与
+  SQLite 数据库**，结束后自动清理，不接触、不修改已有目录或素材。
+- 固定样例 `foreign.sqlite` 的唯一业务对象由
+  `CREATE VIEW source_note AS SELECT 'keep' AS note` 定义，
+  样例准备完成后立即关闭连接。
+- 只使用 Python 3 标准库（unittest / subprocess / tempfile / sqlite3），
+  不依赖网络或第三方包。
+
+### 覆盖内容
+
+1. 固定验收：`python -m asset_catalog --db foreign.sqlite export`
+   退出码 2、标准输出为空，标准错误说明该数据库结构不属于本产品并包含
+   指定数据库路径、不含调用栈；失败前后文件字节完全一致，
+   `SELECT note FROM source_note` 仍返回 `keep`，不留下素材表、标签表、
+   部分新记录或 `-journal`/`-wal`/`-shm` 侧车文件；再次调用得到相同错误。
+2. `query --tag demo`、源文件与参数均合法的 `add`、参数合法的 `retag`
+   在同一视图库上同样确定失败，结论与 `export` 一致（视图数量和名称
+   不改变结果）。
+3. 含多个视图、且视图名为 `asset` 或 `asset_tag` 的 SQLite 文件也按同一
+   规则拒绝；全部原视图定义与查询结果保留。
+4. 参数不合法（`query` 缺 `--tag`、`export` 传不支持的位置参数）或
+   `add` 的源路径不存在时继续遵循既有参数校验规则，且不初始化、不修改
+   视图库。
+5. 对照：在已存在的父目录中对尚不存在的 `fresh.sqlite` 使用同一 `export`
+   入口，仍创建空目录库，退出码 0、标准错误为空、输出 `[]`；新进程再次
+   读取结论一致，之后能正常登记素材并由新进程 `export`/`query` 读回。
+6. 已有零字节文件、没有用户业务对象的空 SQLite 库（`sqlite_master`
+   完全为空，或仅含内部表 `sqlite_sequence`）保持原来的初始化行为。
+7. 父目录不存在仍报错且不补建目录。
+8. 含兼容素材表的正常目录即使附带用户视图与触发器，也继续可用：
+   登记、查询、导出、`retag` 的完整标签、登记顺序与源文件只读规则均不变。
 
 ### 成功结果
 
 成功时输出 `OK`，例如：
 
 ```
-test_add_succeeds_after_condition_removed ... ok
-test_trigger_rejection_reported_as_write_failure_and_rolls_back ... ok
-test_true_duplicate_still_rejected_and_record_not_replaced ... ok
+test_add_rejects_view_only_database ... ok
+test_export_rejects_view_only_database ... ok
+test_fresh_sqlite_export_initializes_then_register_and_read ... ok
+test_empty_sqlite_without_user_objects_is_initialized ... ok
+test_invalid_arguments_still_follow_existing_validation ... ok
+test_missing_parent_directory_is_not_created ... ok
+test_normal_catalog_with_view_and_trigger_remains_usable ... ok
+test_query_rejects_view_only_database ... ok
+test_repeated_calls_fail_identically_and_keep_bytes ... ok
+test_retag_rejects_view_only_database ... ok
+test_view_count_and_names_do_not_change_result ... ok
+test_zero_byte_file_is_initialized ... ok
 
 ----------------------------------------------------------------------
-Ran 3 tests in ...s
+Ran 12 tests in ...s
 
 OK
 ```
 
 重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
-并指出具体差异（退出码、输出、错误信息、持久化记录或素材文件内容）。
+并指出具体差异（退出码、输出、错误信息、文件字节或视图查询结果）。

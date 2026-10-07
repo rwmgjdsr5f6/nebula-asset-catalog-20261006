@@ -107,31 +107,49 @@ def open_database(db_path):
     if not db_path:
         raise CliError("数据库路径不能为空")
 
+    conn = None
     try:
         # 缺父目录、路径为目录、无权限等情况在此处或首次 I/O 时报错。
         conn = sqlite3.connect(db_path)
-        rows = conn.execute(
-            "SELECT name FROM sqlite_master WHERE type = 'table'"
+        # 同时清点用户表与用户视图：视图可以只由常量表达式构成而不依赖任何
+        # 表，因此“没有用户表”不等于“没有已有业务内容”。只含用户视图
+        # （即使视图名为 asset 或 asset_tag）的 SQLite 文件同样不属于本产品
+        # 结构，必须原样拒绝，不能在其中补建素材表与标签表。
+        objects = conn.execute(
+            "SELECT type, name FROM sqlite_master "
+            "WHERE type IN ('table', 'view')"
         ).fetchall()
     except sqlite3.Error as exc:
+        if conn is not None:
+            conn.close()
         raise CliError(f"无法打开数据库 {db_path}: {exc}")
 
-    table_names = {row[0] for row in rows}
+    table_names = {name for kind, name in objects if kind == "table"}
+    view_names = {name for kind, name in objects if kind == "view"}
     internal = {"sqlite_sequence"}
     user_tables = table_names - internal
 
     try:
-        if not user_tables:
-            create_schema(conn)
-        elif "asset" in table_names and "asset_tag" in table_names:
+        if "asset" in table_names and "asset_tag" in table_names:
             verify_schema(conn)
-        else:
+        elif user_tables or view_names:
+            # 有任意用户业务对象（用户表或用户视图）却不具备本产品的两张
+            # 兼容表：属于其他产品/用途的数据库，拒绝覆盖或重建。
             raise CliError(
                 f"数据库 {db_path} 结构不属于本产品，拒绝覆盖或重建"
             )
+        else:
+            # 既无用户表也无用户视图：零字节文件或完全空白的 SQLite 库，
+            # 按既有规则初始化为空目录库。
+            create_schema(conn)
     except sqlite3.Error as exc:
         conn.close()
         raise CliError(f"数据库 {db_path} 已损坏或无法读写: {exc}")
+    except CliError:
+        # 结构不属于本产品：不做任何写入，关闭只读连接后原样抛出，
+        # 保证被拒绝的文件不留下日志或页缓存改动。
+        conn.close()
+        raise
 
     return conn
 
