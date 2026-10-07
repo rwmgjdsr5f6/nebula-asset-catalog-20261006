@@ -16,6 +16,7 @@
 - `tests/test_retag_atomicity.py`：`retag` 写入中途失败的原子性专项回归测试（旧标签进入替换流程后失败仍保留既有记录、不留部分新标签）。
 - `tests/test_add_write_failure_regression.py`：`add` 写入被数据库约束或触发器拒绝时的失败原因归类回归测试（未登记路径报数据库写入失败而非已登记、整体回滚、撤去条件后恢复成功、真实重复仍拒绝）。
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
+- `tests/test_query_nested_path.py`：登记路径的中间目录组件被普通文件暂时替换时，`query` 仍把该路径归为 `missing`（而非 `not_file` 或查询错误）、目录记录仍可追溯且恢复后自动转为 `present` 的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -891,3 +892,77 @@ OK
 
 重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
 并指出具体差异（退出码、输出、错误信息、文件字节或视图查询结果）。
+
+## query 中间路径组件被替换（missing 边界）回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行（验收入口）：
+
+```sh
+python -m unittest tests.test_query_nested_path -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_query_nested_path.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例、`export` 用于核对登记元数据，测试对象为 `query`
+  在“登记路径的中间组件不是目录”这一边界上的行为）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，只创建/清理自己的样例，不接触、不修改已有目录或素材，
+  重复执行不依赖上次残留；不依赖网络或第三方包（仅用 Python 3 标准库）。
+- 通过 `json.loads` 比较解析后的 JSON 数据，不依赖空白格式或对象键顺序。
+
+### 固定场景与预期
+
+固定样例只含两条素材，**先登记 A、再登记 B**，两者类型均为 `image`，
+标签顺序均为 `demo`、`ui`：
+
+- A 位于临时目录的 `nested/a.bin`；
+- B 位于同一临时目录的 `b.bin`。
+
+登记后移除 A 及其父目录 `nested`，再在 `nested` 原位置创建一个内容固定的
+普通文件；B 保持原样。此时对 A 的登记路径做 `os.stat` 会得到“中间组件
+不是目录”（NotADirectoryError）。
+
+1. `query --tag demo --check-files`：退出码 0、标准错误为空，标准输出仅为
+   一个 JSON 数组，按登记顺序返回 A、B 两条记录；A 的 `file_status` 为
+   `missing`（中间组件不是目录按 missing 处理，**不判为 `not_file` 也不报错**），
+   B 为 `present`；两条记录的路径、类型与完整标签顺序与登记结果一致。
+2. `query --tag demo --file-status missing`：只返回 A 的原元数据，仅含
+   `path`、`type`、`tags`，**不附加** `file_status`；再加 `--check-files`
+   后仍只返回 A，并附加 `"file_status": "missing"`；
+   `--file-status not_file` 返回 `[]`。
+3. 中间组件被替换期间，不带任何状态选项的 `query --tag demo` 仍返回原有
+   A、B 两条记录，且均不含 `file_status`。
+4. 用同一样例恢复 `nested` 目录及 `a.bin`（**不重新登记**）：随后由**新进程**
+   执行 `--file-status missing` 筛选得到 `[]`；带 `--check-files` 的标签查询中
+   两条素材都显示 `present`。
+5. 各次查询不改变登记元数据（数据库字节不变，`export` 仍原样按顺序返回
+   A、B），不改写 B 或替代 `nested` 的普通文件内容。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_check_files_reports_missing_when_intermediate_component_is_file ... ok
+test_missing_filter_returns_only_a_original_metadata ... ok
+test_plain_tag_query_keeps_both_records_without_status_while_broken ... ok
+test_queries_do_not_change_metadata_or_file_contents ... ok
+test_restored_nested_path_reports_present_without_reregistration ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in ...s
+
+OK
+```
+
+重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
+并指出具体差异（退出码、输出、错误信息、登记元数据或素材文件内容）。
