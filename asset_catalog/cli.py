@@ -1,6 +1,6 @@
 """命令行入口：素材登记（add）、按标签查询（query）、完整目录导出（export）、
-按路径查看单条记录（show）、标签替换、追加或移除（retag）、类型修改（retype）
-与已用标签统计（tags）。
+按路径查看单条记录（show）、标签替换、追加或移除（retag）、类型修改（retype）、
+已用标签统计（tags）与单条记录重新关联本地路径（relink）。
 
 仅使用 Python 3 标准库。所有可预期的错误均以退出码 2 结束，
 标准输出为空，标准错误给出单行原因，不输出调用栈。
@@ -167,6 +167,16 @@ def build_parser():
         "--type", required=True, help="新的素材类型（必填）"
     )
     retype_parser.set_defaults(handler=handle_retype)
+
+    relink_parser = subparsers.add_parser(
+        "relink", help="把一条已登记素材重新关联到新的本地路径"
+    )
+    relink_parser.add_argument("old_path", help="已登记素材的当前路径")
+    relink_parser.add_argument(
+        "new_path",
+        help="要关联到的新本地路径（须当前存在且为普通文件，符号链接按目标解析）",
+    )
+    relink_parser.set_defaults(handler=handle_relink)
 
     return parser
 
@@ -863,6 +873,79 @@ def handle_retype(args):
     print(
         json.dumps(
             {"path": canonical_path, "type": asset_type, "tags": tags},
+            ensure_ascii=False,
+        )
+    )
+    return EXIT_OK
+
+
+def handle_relink(args):
+    # 原路径按 show 的同一规则解析为规范绝对路径定位记录：不要求源文件当前
+    # 存在或仍是普通文件，原文件已删除或原位置变成目录也允许重新关联。
+    # 新路径按 add 的同一规则解析：要求当前存在且为普通文件，符号链接按
+    # 目标解析，记录保存目标的规范绝对路径。两侧校验都在打开数据库之前
+    # 完成，参数错误不创建数据库。
+    if not args.old_path:
+        raise CliError("原路径不能为空")
+    if not args.new_path:
+        raise CliError("新路径不能为空")
+    canonical_old = os.path.realpath(args.old_path)
+    canonical_new = os.path.realpath(args.new_path)
+
+    if not os.path.exists(canonical_new):
+        raise CliError(f"新路径不存在: {canonical_new}")
+    if not os.path.isfile(canonical_new):
+        raise CliError(f"新路径不是普通文件: {canonical_new}")
+
+    # 目录数据库不能作为关联目标：与 add 同一规则，两侧路径都解析为规范
+    # 绝对路径后相同即拒绝。检查在打开数据库之前进行，已有空文件不会因此
+    # 被初始化，非 SQLite 或不兼容 SQLite 文件也保持原内容。
+    canonical_db_path = os.path.realpath(args.db)
+    if canonical_new == canonical_db_path:
+        raise CliError(f"目录数据库不能作为关联目标: {canonical_new}")
+
+    conn = open_database(args.db)
+    try:
+        row = conn.execute(
+            "SELECT id, type FROM asset WHERE path = ?", (canonical_old,)
+        ).fetchone()
+        if row is None:
+            raise CliError(f"素材未登记: {canonical_old}")
+        asset_id, asset_type = row
+
+        if canonical_new != canonical_old:
+            # 新路径属于另一条登记记录时拒绝：不合并、不覆盖任何记录。
+            conflict = conn.execute(
+                "SELECT 1 FROM asset WHERE path = ? AND id != ?",
+                (canonical_new, asset_id),
+            ).fetchone()
+            if conflict is not None:
+                raise CliError(f"新路径已被其他素材登记: {canonical_new}")
+
+            # 只更新目录中保存的路径：UPDATE 与 commit 在同一事务中完成，
+            # 失败时整体回滚，原记录完整保留，不留部分修改。操作不移动、
+            # 复制、删除或改写任何文件，也不读取素材内容或扫描目录。
+            conn.execute(
+                "UPDATE asset SET path = ? WHERE id = ?",
+                (canonical_new, asset_id),
+            )
+            conn.commit()
+        # 新旧规范路径相同且目标仍为普通文件（上方已校验）时无需写入，
+        # 直接按原记录成功返回。
+
+        # 完整标签按登记顺序读取，用于输出重新关联后的完整记录。
+        tags = fetch_current_tags(conn, asset_id)
+    except sqlite3.Error as exc:
+        conn.rollback()
+        raise CliError(f"数据库读写失败: {exc}")
+    finally:
+        conn.close()
+
+    # 只改路径：类型、完整标签及其顺序、首次登记顺序与其他素材的记录
+    # 保持不变；更新已提交，重启或新进程后仍可读取。
+    print(
+        json.dumps(
+            {"path": canonical_new, "type": asset_type, "tags": tags},
             ensure_ascii=False,
         )
     )
