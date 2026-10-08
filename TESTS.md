@@ -22,6 +22,7 @@
 - `tests/test_query_nested_path.py`：`query` 在登记路径的中间组件被替换为普通文件（不再是目录）时，文件状态检查与 `--file-status` 筛选仍把该路径归为 `missing`、目录记录可追溯的回归测试。
 - `tests/test_retype_write_failure_regression.py`：`retype` 类型写入被数据库触发器拒绝时旧记录完整保留、撤去拒绝条件后同一输入成功修改的回归测试。
 - `tests/test_export_symlink_status_regression.py`：`export --check-files` 在登记路径后来变为符号链接时按链接目标判状态、输出仍保留原登记路径的专项回归测试（有效链接 present、断链 missing、重建后恢复 present、指向目录 not_file）。
+- `tests/test_relink_regression.py`：`relink` 重新关联本地路径（固定样例验收、等价路径与符号链接、同路径返回原记录、目标冲突与目录数据库拒绝、参数与数据库错误、写入失败回滚恢复）的回归测试。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -1385,3 +1386,88 @@ OK
 正常执行）；重复执行结论一致；任一上述行为不符时 unittest 以非零退出码
 退出，并指出具体场景与差异（退出码、标准错误、输出行数、状态、顺序、
 元数据、数据库字节、B/T 内容或链接指向）。
+
+## relink 重新关联本地路径回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_relink_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_relink_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，`show`/`query`/`export` 用于核对持久化结果，
+  测试对象为 `relink`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+
+### 覆盖内容
+
+固定验收样例按 A.old、B.bin 顺序登记：A 类型 `image`，标签依次为 `demo`、
+`ui`；B 类型 `audio`，标签只有 `demo`。准备样例时把 A.old 移到 A.new。
+
+1. 验收场景：`relink A.old A.new` 退出码 0、标准错误为空，标准输出仅一行
+   JSON 对象，含 A.new 的规范绝对路径、原类型 `image` 与完整标签
+   `["demo", "ui"]`；随后 `show A.new` 返回 A 的完整记录，
+   `query --tag demo` 仍依次返回 A、B，`export` 顺序不变，只有 A 的路径
+   变化，`show A.old` 报告未登记（错误含规范路径）。
+2. 原路径按 show 的规则解析（相对路径、含 `.` 的等价写法定位同一记录）；
+   原文件已删除或原位置变成目录也允许关联；新路径为符号链接时保存目标的
+   规范绝对路径。
+3. 操作只更新目录中的路径：不移动、复制、删除或改写文件，样例文件内容
+   保持不变；类型、标签及顺序、首次登记顺序与 B 的记录不变，新进程读取
+   结果一致。
+4. 新旧规范路径相同且目标仍为普通文件时不写库，成功返回原记录。
+5. 原路径未登记、新文件不存在或不是普通文件（目录）、目标已登记
+   （不合并或覆盖）、目标为目录数据库（含已有空文件不因此被初始化）：
+   退出码 2、标准输出为空、标准错误说明原因并含相关规范路径、不含调用栈。
+6. 路径缺失或为空、缺少 `--db`、数据库路径为空、不支持的参数：退出码 2，
+   不创建数据库；数据库不存在且父目录存在时初始化空库后报告原路径未登记，
+   父目录缺失时不补建目录。
+7. 数据库路径指向目录、非 SQLite 文件、含其他业务表的 SQLite 文件：
+   均被拒绝，文件字节前后完全一致；写入被触发器拒绝时整体回滚，
+   原记录完整保留，撤去拒绝条件后同一输入成功。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_acceptance_move_then_relink ... ok
+test_argument_errors_do_not_create_database ... ok
+test_database_open_and_schema_errors_rejected ... ok
+test_deleted_or_directory_old_location_still_relinkable ... ok
+test_equivalent_old_path_spellings_resolve_same_record ... ok
+test_fresh_database_created_then_unregistered_reported ... ok
+test_missing_or_empty_path_arguments_rejected ... ok
+test_missing_parent_directory_is_not_created ... ok
+test_new_file_missing_or_not_regular_rejected ... ok
+test_new_path_equal_to_database_rejected ... ok
+test_new_path_equal_to_empty_db_file_not_initialized ... ok
+test_new_path_registered_to_another_record_rejected ... ok
+test_new_path_symlink_stores_target_canonical_path ... ok
+test_relink_does_not_touch_files ... ok
+test_relink_persists_across_processes_and_other_commands ... ok
+test_same_canonical_path_returns_original_record ... ok
+test_unregistered_old_path_rejected_with_canonical_path ... ok
+test_write_failure_rolls_back_then_recovers ... ok
+
+----------------------------------------------------------------------
+Ran 18 tests in ...s
+
+OK
+```
+
+重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。

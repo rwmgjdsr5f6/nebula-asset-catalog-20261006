@@ -48,13 +48,14 @@ cli.py:17），标准输出为空。
   `--check-files`；传入标签、类型、多余位置参数或其他子命令选项时，
   `_Parser.error`（cli.py:27-32）输出用法与单行错误后以退出码 2 结束。
   这类参数错误发生在 `open_database` 之前，**不会创建或修改数据库文件**。
-- **七个处理器共用同一打开规则**：`handle_add`（cli.py:302）、
-  `handle_query`（cli.py:470）、`handle_export`（cli.py:538）、
-  `handle_tags`（cli.py:582）、`handle_show`（cli.py:632）、
-  `handle_retag`（cli.py:752）、`handle_retype`（cli.py:802）都调用
+- **八个处理器共用同一打开规则**：`handle_add`（cli.py:296）、
+  `handle_query`（cli.py:463）、`handle_export`（cli.py:549）、
+  `handle_tags`（cli.py:584）、`handle_show`（cli.py:657）、
+  `handle_retag`（cli.py:774）、`handle_retype`（cli.py:823）、
+  `handle_relink`（cli.py:879）都调用
   `open_database`。因此下文的初始化、沿用与拒绝判定对所有子命令一致；
   各命令在打开数据库之前自行做的参数校验（如 add 的源路径检查、
-  query/retag 的标签校验）失败时同样不触发建库。
+  query/retag 的标签校验、relink 的新路径文件校验）失败时同样不触发建库。
 
 ## 3. open_database 的判定：初始化、沿用、拒绝
 
