@@ -115,6 +115,14 @@ def build_parser():
         "--type",
         help="可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写）",
     )
+    tags_parser.add_argument(
+        "--prefix",
+        help=(
+            "可选标签前缀，去除首尾空白后与保存的标签文本逐字符比较"
+            "（区分大小写），只列出处以该文本开头的已用标签；"
+            "%%、_ 与反斜线均为普通字符，不做子串匹配"
+        ),
+    )
     tags_parser.set_defaults(handler=handle_tags)
 
     show_parser = subparsers.add_parser(
@@ -579,6 +587,15 @@ def handle_tags(args):
         if not asset_type:
             raise CliError("素材类型 --type 去除首尾空白后不能为空")
 
+    # 可选 --prefix 同样只去除首尾空白：去空白后为空（缺值由 argparse
+    # 拒绝）即按参数错误处理，校验先于打开数据库，不创建数据库。中间空白、
+    # 中文及 %、_、反斜线等字符全部原样保留。
+    tag_prefix = None
+    if args.prefix is not None:
+        tag_prefix = args.prefix.strip()
+        if not tag_prefix:
+            raise CliError("标签前缀 --prefix 去除首尾空白后不能为空")
+
     conn = open_database(args.db)
     try:
         # 标签按完整文本分组，区分大小写、不改写标签文本；同一素材的同一
@@ -610,8 +627,18 @@ def handle_tags(args):
     finally:
         conn.close()
 
+    # 前缀筛选在 Python 侧用 str.startswith 逐字符完成：只匹配标签开头、
+    # 区分大小写、不做子串匹配，%、_ 与反斜线均为普通字符，中间空白与
+    # 中文原样参与比较。与 --type 同用时行已只含指定类型素材的统计。
+    if tag_prefix is not None:
+        rows = [
+            (tag, asset_count)
+            for tag, asset_count in rows
+            if tag.startswith(tag_prefix)
+        ]
+
     # 每个标签只出现一次，按标签文本的 Unicode 码点字典序升序排列；
-    # 空目录输出 []。
+    # 空目录或无匹配前缀输出 []。
     result = [
         {"tag": tag, "asset_count": asset_count}
         for tag, asset_count in sorted(rows, key=lambda row: row[0])
