@@ -115,6 +115,14 @@ def build_parser():
         "--type",
         help="可选素材类型，去除首尾空白后与登记类型完整匹配（区分大小写）",
     )
+    tags_parser.add_argument(
+        "--prefix",
+        help=(
+            "可选标签前缀：只列出名称以此文本开头的已用标签；取值去除"
+            "首尾空白后逐字符匹配（区分大小写，只匹配开头，%%、_ 与反斜线"
+            "均为普通字符），为空或只有空白时按参数错误拒绝"
+        ),
+    )
     tags_parser.set_defaults(handler=handle_tags)
 
     show_parser = subparsers.add_parser(
@@ -571,19 +579,31 @@ def handle_tags(args):
     # 文件状态，也不扫描目录，因此源文件已删除或原路径变成目录的素材仍
     # 参与统计；不改动数据库或源文件。
     # 可选 --type 去除首尾空白后与登记类型完整匹配（区分大小写），接受任意
-    # 非空文本，不按扩展名推断；校验在打开数据库之前完成，参数错误不创建
-    # 数据库。不传 --type 时统计全目录。
+    # 非空文本，不按扩展名推断。
+    # 可选 --prefix 同样先去除首尾空白，再与保存的标签文本逐字符比较：
+    # 区分大小写、保留中间空白与中文、只匹配标签开头，%、_ 与反斜线均为
+    # 普通字符，不做子串匹配。两项校验都在打开数据库之前完成，参数错误
+    # 不创建数据库。均不传时统计全目录。
     asset_type = None
     if args.type is not None:
         asset_type = args.type.strip()
         if not asset_type:
             raise CliError("素材类型 --type 去除首尾空白后不能为空")
 
+    tag_prefix = None
+    if args.prefix is not None:
+        tag_prefix = args.prefix.strip()
+        if not tag_prefix:
+            raise CliError("标签前缀 --prefix 去除首尾空白后不能为空")
+
     conn = open_database(args.db)
     try:
         # 标签按完整文本分组，区分大小写、不改写标签文本；同一素材的同一
         # 标签只计一次（asset_tag 主键已保证唯一，DISTINCT 使语义显式）。
         # 没有素材使用的标签不在 asset_tag 中，自然不会输出零计数项。
+        # 前缀筛选不放进 SQL 的 LIKE：%、_ 与反斜线都必须按普通字符处理，
+        # 因此先取完整分组计数，再在 Python 侧按标签开头逐字符比较，绝不
+        # 把共享前缀的不同标签合并计数。
         if asset_type is None:
             rows = conn.execute(
                 """
@@ -594,6 +614,7 @@ def handle_tags(args):
             ).fetchall()
         else:
             # 只统计指定类型的素材：按登记类型完整匹配（区分大小写），
+            # 与 --prefix 同用时先限定类型再保留满足前缀的标签；
             # 无匹配类型时结果为空，输出 []。
             rows = conn.execute(
                 """
@@ -610,8 +631,13 @@ def handle_tags(args):
     finally:
         conn.close()
 
+    if tag_prefix is not None:
+        # str.startswith 逐码点比较、区分大小写、只匹配开头，不做大小写
+        # 折叠或子串匹配，中间空白与中文原样参与比较。
+        rows = [row for row in rows if row[0].startswith(tag_prefix)]
+
     # 每个标签只出现一次，按标签文本的 Unicode 码点字典序升序排列；
-    # 空目录输出 []。
+    # 空目录或无匹配前缀输出 []。
     result = [
         {"tag": tag, "asset_count": asset_count}
         for tag, asset_count in sorted(rows, key=lambda row: row[0])

@@ -20,6 +20,10 @@
   且不含调用栈；被拒绝的损坏或不兼容数据库字节保持不变；
 - --type 按类型筛选统计：类型去除首尾空白后与登记类型完整匹配
   （区分大小写），只统计该类型素材的标签；无匹配类型输出 []；
+- --prefix 按标签前缀筛选：前缀值去除首尾空白后与保存的标签文本逐字符
+  比较，区分大小写、保留中间空白与中文、只匹配标签开头，%、_ 与反斜线均为
+  普通字符；不合并共享前缀的不同标签，无匹配输出 []；缺值、为空或只有空白
+  时退出码 2 且不创建数据库；其他子命令收到 `--prefix` 同样拒绝；
 - 读取失败时不输出部分数组。
 
 每个用例使用独立的临时目录与数据库，只创建/清理自己的样例文件。
@@ -347,6 +351,234 @@ class TagsRegressionTest(unittest.TestCase):
         fresh = self.tmp_dir / "fresh.sqlite"
         self.assertTagsError("--type", "  ", db=fresh)
         self.assertFalse(fresh.exists())
+
+    def register_prefix_samples(self):
+        """登记验收样例：A（image: ui、ui.button、UI）、B（image:
+        ui.button）、C（audio: ui.button、audio）。"""
+        file_c = self.tmp_dir / "C.bin"
+        file_c.write_text("demo asset C\n", encoding="utf-8")
+        samples = [
+            (self.file_a, "image", ("ui", "ui.button", "UI")),
+            (self.file_b, "image", ("ui.button",)),
+            (file_c, "audio", ("ui.button", "audio")),
+        ]
+        for path, asset_type, tags in samples:
+            cmd = ["add", str(path), "--type", asset_type]
+            for tag in tags:
+                cmd += ["--tag", tag]
+            result = self.run_cli(*cmd)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(result.stderr, "")
+        return file_c
+
+    def test_tags_prefix_acceptance_counts(self):
+        # 验收场景：--prefix ui 依次为 ui 计 1、ui.button 计 3；UI 不入选。
+        self.register_prefix_samples()
+        self.assertTagsOk(
+            [
+                {"tag": "ui", "asset_count": 1},
+                {"tag": "ui.button", "asset_count": 3},
+            ],
+            None,
+            "--prefix",
+            "ui",
+        )
+
+    def test_tags_prefix_with_type_filters_scope_first(self):
+        # 同用 --type image：先把范围限定为 image 素材，再保留前缀标签：
+        # ui 计 1（仅 A）、ui.button 计 2（A、B）；audio 的 C 不参与。
+        self.register_prefix_samples()
+        self.assertTagsOk(
+            [
+                {"tag": "ui", "asset_count": 1},
+                {"tag": "ui.button", "asset_count": 2},
+            ],
+            None,
+            "--prefix",
+            "ui",
+            "--type",
+            "image",
+        )
+        # 类型顺序可互换，结论一致。
+        self.assertTagsOk(
+            [
+                {"tag": "ui", "asset_count": 1},
+                {"tag": "ui.button", "asset_count": 2},
+            ],
+            None,
+            "--type",
+            "image",
+            "--prefix",
+            "ui",
+        )
+        # 无素材匹配类型时成功输出 []。
+        self.assertTagsOk([], None, "--prefix", "ui", "--type", "video")
+
+    def test_tags_prefix_is_case_sensitive_and_start_only(self):
+        self.register_prefix_samples()
+        # 区分大小写：大写 UI 只选 UI，不会选到 ui 或 ui.button。
+        self.assertTagsOk(
+            [{"tag": "UI", "asset_count": 1}], None, "--prefix", "UI"
+        )
+        # 只匹配标签开头：button 是 ui.button 的中间子串，不入选。
+        self.assertTagsOk([], None, "--prefix", "button")
+        # 无任何标签以该文本开头时成功输出 []，不输出零计数项。
+        self.assertTagsOk([], None, "--prefix", "ui.button.x")
+
+    def test_tags_prefix_treats_special_characters_as_literals(self):
+        # %、_、反斜线与句点都是普通字符：只按文本开头逐字符比较，
+        # 不做 LIKE 通配，也不匹配中间子串。
+        file_c = self.tmp_dir / "C.bin"
+        file_c.write_text("demo asset C\n", encoding="utf-8")
+        special_tags = ("ui%", "ui_x", r"ui\back", "a.b", "a%b", "a_b")
+        cmd = ["add", str(file_c), "--type", "image"]
+        for tag in special_tags:
+            cmd += ["--tag", tag]
+        result = self.run_cli(*cmd)
+        self.assertEqual(result.returncode, 0, result.stderr)
+
+        self.assertTagsOk(
+            [{"tag": "ui%", "asset_count": 1}], None, "--prefix", "ui%"
+        )
+        self.assertTagsOk(
+            [{"tag": "ui_x", "asset_count": 1}], None, "--prefix", "ui_"
+        )
+        self.assertTagsOk(
+            [{"tag": r"ui\back", "asset_count": 1}],
+            None,
+            "--prefix",
+            "ui\\",
+        )
+        # 通配文本不得扩大匹配范围：ui%x 不当作“ui 后任意字符再 x”。
+        self.assertTagsOk([], None, "--prefix", "ui%x")
+        # 下划线只按字面匹配：ui_ 只选 ui_x，不选 ui% 或 ui\back。
+        self.assertTagsOk(
+            [{"tag": "ui_x", "asset_count": 1}], None, "--prefix", "ui_"
+        )
+        self.assertTagsOk(
+            [
+                {"tag": "a%b", "asset_count": 1},
+                {"tag": "a.b", "asset_count": 1},
+                {"tag": "a_b", "asset_count": 1},
+            ],
+            None,
+            "--prefix",
+            "a",
+        )
+
+    def test_tags_prefix_strips_edges_keeps_inner_whitespace_and_chinese(self):
+        file_c = self.tmp_dir / "C.bin"
+        file_c.write_text("demo asset C\n", encoding="utf-8")
+        result = self.run_cli(
+            "add",
+            str(file_c),
+            "--type",
+            "image",
+            "--tag",
+            "ui 中",
+            "--tag",
+            "中文 标签",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        # 首尾空白被去除后再匹配；中间空白逐字符保留。
+        self.assertTagsOk(
+            [{"tag": "ui 中", "asset_count": 1}],
+            None,
+            "--prefix",
+            " ui ",
+        )
+        self.assertTagsOk(
+            [{"tag": "ui 中", "asset_count": 1}], None, "--prefix", "ui 中"
+        )
+        # 中间空白不同则不匹配。
+        self.assertTagsOk([], None, "--prefix", "ui中")
+        # 中文前缀逐字符比较、只匹配开头。
+        self.assertTagsOk(
+            [{"tag": "中文 标签", "asset_count": 1}],
+            None,
+            "--prefix",
+            "中文",
+        )
+        self.assertTagsOk([], None, "--prefix", "标签")
+
+    def test_tags_prefix_deleted_or_directory_source_still_counted(self):
+        # 统计不检查登记路径状态：源文件删除或变成目录后前缀统计结果不变。
+        self.register_prefix_samples()
+        self.file_a.unlink()
+        self.file_b.unlink()
+        self.file_b.mkdir()
+        self.assertTagsOk(
+            [
+                {"tag": "ui", "asset_count": 1},
+                {"tag": "ui.button", "asset_count": 3},
+            ],
+            None,
+            "--prefix",
+            "ui",
+        )
+
+    def test_tags_prefix_does_not_change_database(self):
+        self.register_prefix_samples()
+        db_before = self.db_path.read_bytes()
+        self.assertTagsOk(
+            [
+                {"tag": "ui", "asset_count": 1},
+                {"tag": "ui.button", "asset_count": 3},
+            ],
+            None,
+            "--prefix",
+            "ui",
+        )
+        # 前缀统计不改动数据库字节。
+        self.assertEqual(self.db_path.read_bytes(), db_before)
+
+    def test_tags_prefix_no_match_and_empty_database_output_empty_array(self):
+        self.register_prefix_samples()
+        # 无匹配标签成功输出 []，退出码 0、标准错误为空。
+        self.assertTagsOk([], None, "--prefix", "nope")
+        # 父目录存在而数据库不存在：沿用建空库规则，输出 []。
+        fresh = self.tmp_dir / "fresh.sqlite"
+        self.assertFalse(fresh.exists())
+        self.assertTagsOk([], fresh, "--prefix", "ui")
+        self.assertTrue(fresh.exists())
+
+    def test_tags_prefix_missing_or_blank_value_rejected(self):
+        self.register_prefix_samples()
+        db_before = self.db_path.read_bytes()
+        # --prefix 缺值（argparse 拒绝）。
+        self.assertTagsError("--prefix")
+        # --prefix 为空或只有空白。
+        self.assertTagsError("--prefix", "")
+        self.assertTagsError("--prefix", "   ")
+        stderr = self.assertTagsError("--prefix", "\t ")
+        # 错误信息指出该选项及原因，且不含调用栈。
+        self.assertIn("--prefix", stderr)
+        # 参数错误不改动既有数据库。
+        self.assertEqual(self.db_path.read_bytes(), db_before)
+
+    def test_tags_prefix_blank_value_does_not_create_database(self):
+        fresh = self.tmp_dir / "fresh.sqlite"
+        self.assertTagsError("--prefix", "  ", db=fresh)
+        self.assertFalse(fresh.exists())
+
+    def test_prefix_rejected_for_other_subcommands(self):
+        self.register_samples()
+        # --prefix 只属于 tags：其他子命令收到时按参数错误拒绝，
+        # 退出码 2、标准输出为空、标准错误不含调用栈。
+        for args in (
+            ("query", "--tag", "demo", "--prefix", "ui"),
+            ("export", "--prefix", "ui"),
+            ("show", str(self.file_a), "--prefix", "ui"),
+            ("add", str(self.file_a), "--type", "image", "--tag", "demo",
+             "--prefix", "ui"),
+            ("retag", str(self.file_a), "--tag", "demo", "--prefix", "ui"),
+            ("retype", str(self.file_a), "--type", "image",
+             "--prefix", "ui"),
+        ):
+            result = self.run_cli(*args)
+            self.assertEqual(result.returncode, 2, args)
+            self.assertEqual(result.stdout, "", args)
+            self.assertNotIn("Traceback", result.stderr, args)
 
     def test_missing_parent_directory_is_not_created(self):
         missing = self.tmp_dir / "no" / "such" / "catalog.sqlite"
