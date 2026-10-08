@@ -9,7 +9,17 @@
 - 源文件删除后记录仍在结果中，且不出现 file_status 字段；
 - --check-files 为每条记录追加 file_status（present / missing / not_file），
   保留全部记录与首次登记顺序；空目录输出 []；任一记录状态无法判断时
-  整次导出退出码 2、标准输出为空、标准错误说明原因且包含相关路径；
+  整次导出退出码 2、标准输出为空、标准错误说明原因且包含相关路径，
+  已处理过的记录也不会提前输出；
+- A 状态正常、仅 B 的状态查询确定性抛出 PermissionError 时：--check-files
+  整体失败（退出码 2、标准输出为空、标准错误说明“无法确定文件状态”并
+  包含 B 的规范绝对路径、不含调用栈）；同样的失败条件下不带 --check-files
+  的 export 仍以退出码 0 输出 A、B 完整元数据且不含 file_status；撤去失败
+  条件后再次检查，两条记录均为 present，路径、类型、标签顺序与登记顺序
+  不变；失败前后数据库字节与两个源文件内容保持一致。失败由测试经
+  PYTHONPATH 注入子进程的 sitecustomize 垫片合成，只替换 os.stat，与实际
+  权限位和账号身份无关，因此在 Windows 普通用户及 Linux root、非 root
+  环境中均实际执行，不跳过；
 - 导出不改变登记内容（之后 query --tag demo 结果不变），也不改动素材文件；
 - 数据库文件不存在但父目录存在时创建空目录数据库并输出 []，
   父目录缺失时不补建目录；
@@ -32,6 +42,32 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
+CONTENT_A = b"demo asset A\n"
+CONTENT_B = b"demo asset B\n"
+
+# 子进程内自动导入的垫片：仅当环境变量给出目标路径时，把 os.stat 替换为
+# 对该路径固定抛出 PermissionError 的版本，其余路径照常。状态检查进程对
+# B 的规范路径读取状态时即得到稳定的权限错误，不依赖实际权限配置或账号
+# 身份（Windows 普通用户、Linux root 与非 root 行为一致）。
+SITECUSTOMIZE_SOURCE = '''\
+"""测试垫片：对指定路径的 os.stat 固定抛出 PermissionError。"""
+
+import os
+
+_fail_path = os.environ.get("ASSET_CATALOG_TEST_STAT_FAIL_PATH")
+if _fail_path:
+    _real_stat = os.stat
+
+    def _stat_with_fixed_failure(path, *args, **kwargs):
+        if os.fspath(path) == _fail_path:
+            raise PermissionError(13, "Permission denied", _fail_path)
+        return _real_stat(path, *args, **kwargs)
+
+    os.stat = _stat_with_fixed_failure
+'''
+
+STAT_FAIL_ENV = "ASSET_CATALOG_TEST_STAT_FAIL_PATH"
+
 
 class ExportRegressionTest(unittest.TestCase):
     def setUp(self):
@@ -39,9 +75,17 @@ class ExportRegressionTest(unittest.TestCase):
         self.tmp_dir = Path(self._tmp.name)
         self.file_a = self.tmp_dir / "A.bin"
         self.file_b = self.tmp_dir / "B.bin"
-        self.file_a.write_text("demo asset A\n", encoding="utf-8")
-        self.file_b.write_text("demo asset B\n", encoding="utf-8")
+        self.file_a.write_bytes(CONTENT_A)
+        self.file_b.write_bytes(CONTENT_B)
         self.db_path = self.tmp_dir / "catalog.sqlite"
+
+        # 垫片目录：sitecustomize.py 随 PYTHONPATH 进入每个子进程，
+        # 仅在环境变量点名 B 的规范路径时生效。
+        self.shim_dir = self.tmp_dir / "shim"
+        self.shim_dir.mkdir()
+        (self.shim_dir / "sitecustomize.py").write_text(
+            SITECUSTOMIZE_SOURCE, encoding="utf-8"
+        )
 
         self.expected_a = {
             "path": os.path.realpath(str(self.file_a)),
@@ -57,8 +101,12 @@ class ExportRegressionTest(unittest.TestCase):
     def tearDown(self):
         self._tmp.cleanup()
 
-    def run_cli(self, *args, db=None):
-        """以全新进程运行 python -m asset_catalog，返回 CompletedProcess。"""
+    def run_cli(self, *args, db=None, fail_stat_on_b=False):
+        """以全新进程运行 python -m asset_catalog，返回 CompletedProcess。
+
+        fail_stat_on_b 为真时，该进程内对 B 的规范登记路径的 os.stat
+        固定抛出 PermissionError，其余路径与不带开关时完全一致。
+        """
         cmd = [
             sys.executable,
             "-m",
@@ -67,11 +115,23 @@ class ExportRegressionTest(unittest.TestCase):
             str(self.db_path if db is None else db),
             *args,
         ]
+        # 显式把项目根与垫片目录放入 PYTHONPATH，使验收命令在任意工作
+        # 目录下均可解析 asset_catalog 包与 sitecustomize 垫片；子进程
+        # 仍是全新的独立进程。
+        env = os.environ.copy()
+        env["PYTHONPATH"] = os.pathsep.join(
+            [str(PROJECT_ROOT), str(self.shim_dir), env.get("PYTHONPATH", "")]
+        )
+        if fail_stat_on_b:
+            env[STAT_FAIL_ENV] = self.expected_b["path"]
+        else:
+            env.pop(STAT_FAIL_ENV, None)
         return subprocess.run(
             cmd,
             cwd=str(PROJECT_ROOT),
             capture_output=True,
             text=True,
+            env=env,
         )
 
     def register_samples(self):
@@ -222,28 +282,58 @@ class ExportRegressionTest(unittest.TestCase):
         self.assertEqual(result.stderr, "")
         self.assertEqual(json.loads(result.stdout), [])
 
-    @unittest.skipIf(os.geteuid() == 0, "root 不受权限位限制")
     def test_check_files_status_error_fails_whole_export(self):
+        # A 状态正常，仅 B 的状态查询确定性抛出 PermissionError。错误由
+        # 子进程内的 sitecustomize 垫片对 os.stat 定点替换合成，不改动
+        # 实际权限位，因此 Windows 普通用户、Linux root 与非 root 都执行
+        # 本用例，不跳过。
         self.register_samples()
-        locked = self.tmp_dir / "locked"
-        locked.mkdir()
-        locked_file = locked / "c.bin"
-        locked_file.write_text("demo asset C\n", encoding="utf-8")
-        result = self.run_cli(
-            "add", str(locked_file), "--type", "image", "--tag", "locked"
+        db_before = self.db_path.read_bytes()
+        a_before = self.file_a.read_bytes()
+        b_before = self.file_b.read_bytes()
+
+        # --check-files：整次导出失败，不提前输出 A 的记录。
+        result = self.run_cli("export", "--check-files", fail_stat_on_b=True)
+        self.assertEqual(
+            result.returncode,
+            2,
+            f"状态读取失败应退出为 2；实际退出码 {result.returncode}，"
+            f"输出: {result.stdout!r}，错误: {result.stderr!r}",
         )
+        # 标准输出完全为空：A 虽已处理也不能提前输出。
+        self.assertEqual(result.stdout, "")
+        self.assertIn("无法确定文件状态", result.stderr)
+        self.assertIn(self.expected_b["path"], result.stderr)
+        self.assertNotIn(self.expected_a["path"], result.stdout)
+        self.assertNotIn("Traceback", result.stderr)
+
+        # 同样的失败条件下，不带 --check-files 的 export 不访问文件系统：
+        # 退出码 0、标准错误为空，输出 A、B 完整元数据且不含 file_status。
+        result = self.run_cli("export", fail_stat_on_b=True)
         self.assertEqual(result.returncode, 0, result.stderr)
-        locked.chmod(0)
-        try:
-            result = self.run_cli("export", "--check-files")
-            self.assertEqual(result.returncode, 2)
-            self.assertEqual(result.stdout, "")
-            self.assertIn("无法确定文件状态", result.stderr)
-            self.assertIn(os.path.realpath(str(locked_file)), result.stderr)
-            self.assertNotIn("Traceback", result.stderr)
-        finally:
-            # 先恢复权限，tearDown 才能清理临时目录。
-            locked.chmod(0o700)
+        self.assertEqual(result.stderr, "")
+        data = json.loads(result.stdout)
+        self.assertEqual(data, [self.expected_a, self.expected_b])
+        for record in data:
+            self.assertNotIn("file_status", record)
+
+        # 撤去失败条件后再次检查：两条记录均 present，原路径、类型、
+        # 标签顺序与登记顺序不变。
+        result = self.run_cli("export", "--check-files")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stderr, "")
+        self.assertEqual(
+            json.loads(result.stdout),
+            [
+                {**self.expected_a, "file_status": "present"},
+                {**self.expected_b, "file_status": "present"},
+            ],
+        )
+
+        # 失败前后数据库字节与两个源文件内容保持一致。
+        self.assertEqual(self.db_path.read_bytes(), db_before)
+        self.assertEqual(self.file_a.read_bytes(), a_before)
+        self.assertEqual(self.file_b.read_bytes(), b_before)
 
     def test_database_path_is_directory_rejected(self):
         target = self.tmp_dir / "a_directory"
