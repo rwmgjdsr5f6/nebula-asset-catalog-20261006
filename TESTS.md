@@ -11,6 +11,7 @@
 - `tests/test_query_tag_mode_any_regression.py`：`query --tag-mode any` 任选标签查询（含默认/`all` 交集不变、与 `--type`、`--check-files` 组合及参数错误）的回归测试。
 - `tests/test_query_exclude_tag_regression.py`：`query --exclude-tag` 按标签排除素材（含 all/any 与 `--type`、命中与排除同标签、与 `--check-files`/`--file-status` 组合、参数错误与其他子命令拒绝）的回归测试。
 - `tests/test_export_regression.py`：`export` 完整目录导出（顺序、字段、文件状态无关、空库与各类错误）及 `export --check-files` 全目录文件状态查看的回归测试。
+- `tests/test_export_check_files_symlink_regression.py`：`export --check-files` 对登记路径变为符号链接（指向未登记普通文件、断链与重建、指向目录）时状态按链接目标判定、输出保留登记路径的专项回归测试。
 - `tests/test_show_regression.py`：`show` 按路径查看单条记录（验收命令、等价路径与符号链接、源文件删除或变目录、未登记、参数与数据库错误、导出顺序不变）的回归测试。
 - `tests/test_show_file_status_regression.py`：`show --check-files` 单条记录文件状态查看（missing/not_file/present 验收序列、断链与中间组件、未登记与权限错误、只读与其他素材状态无关）的回归测试。
 - `tests/test_retag_regression.py`：`retag` 标签替换（规范化、持久化、源文件状态无关、各类错误）的回归测试。
@@ -545,6 +546,68 @@ OK
 ```
 
 重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
+并指出对应场景。
+
+## export --check-files 符号链接状态判定回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行：
+
+```sh
+python -m unittest tests.test_export_check_files_symlink_regression -v
+```
+
+也可以直接运行测试文件：
+
+```sh
+python tests/test_export_check_files_symlink_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，测试对象为 `export --check-files`）。
+- 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或素材，不依赖网络或外部素材。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+- 环境确实不支持创建符号链接时，仅跳过相关用例并说明原因，
+  其他错误使测试失败，跳过不计为行为验证通过。
+
+### 覆盖内容
+
+固定验收样例按 A、B 顺序登记：A 类型 `image`，标签依次为 `demo`、`ui`；
+B 类型 `audio`，标签只有 `music`。每次导出均要求退出码 0、标准错误为空、
+标准输出仅一行 JSON 数组。
+
+1. A 原路径被替换为指向未登记普通文件 T 的符号链接后，
+   `export --check-files` 按 A、B 顺序各输出一次，状态均为 `present`；
+   A 的 `path`、`type`、`tags` 保持登记值，T 不成为目录记录。
+2. 删除 T 形成断链后：A 报告 `missing`、B 仍为 `present`，两条记录均保留；
+   在原目标位置重建 T 后，新导出进程重新报告 A 为 `present`，无需再次登记。
+3. 独立样例中 A 原路径被替换为指向临时目录的符号链接：
+   A 报告 `not_file`、B 仍为 `present`，结果顺序与元数据不变。
+4. 上述每种状态下不带 `--check-files` 的 `export` 仍返回 A、B 两条
+   原元数据记录，不含 `file_status`。
+5. 每次导出前后样例数据库字节、B 与仍存在的 T 的内容以及链接指向
+   均不变（样例准备中主动删除或重建的内容除外）。
+
+### 成功结果
+
+成功时输出 `OK`，例如：
+
+```
+test_symlink_to_directory_reports_not_file ... ok
+test_symlink_to_unregistered_file_present_missing_present_cycle ... ok
+
+----------------------------------------------------------------------
+Ran 2 tests in ...s
+
+OK
+```
+
+环境不支持创建符号链接时对应行显示 `skipped '当前环境不支持创建符号链接: ...'`，
+其余用例不受影响。重复执行结论一致；任一预期不符时 unittest 以非零退出码退出，
 并指出对应场景。
 
 ## show 按路径查看单条记录回归测试（新增）
