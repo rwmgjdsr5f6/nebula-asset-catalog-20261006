@@ -21,6 +21,7 @@
 - `tests/test_view_database_rejection_regression.py`：只含用户视图（无用户表）的 SQLite 文件必须被四个目录操作拒绝、空库仍正常初始化的回归测试。
 - `tests/test_query_nested_path.py`：`query` 在登记路径的中间组件被替换为普通文件（不再是目录）时，文件状态检查与 `--file-status` 筛选仍把该路径归为 `missing`、目录记录可追溯的回归测试。
 - `tests/test_retype_write_failure_regression.py`：`retype` 类型写入被数据库触发器拒绝时旧记录完整保留、撤去拒绝条件后同一输入成功修改的回归测试。
+- `tests/test_export_symlink_status_regression.py`：`export --check-files` 在登记路径后来变为符号链接时按链接目标判状态、输出仍保留原登记路径的专项回归测试（有效链接 present、断链 missing、重建后恢复 present、指向目录 not_file）。
 
 三组测试均从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用，
 每个用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
@@ -1296,3 +1297,91 @@ OK
 
 重复执行得到一致结果；任一上述行为不符时 unittest 以非零退出码退出，
 并指出具体差异（退出码、输出、错误信息、持久化记录或素材文件内容）。
+
+## export 登记路径变为符号链接时的文件状态专项回归测试（新增）
+
+### 运行入口
+
+在项目根目录（`asset_catalog/` 所在目录）执行（验收入口）：
+
+```sh
+python -m unittest tests.test_export_symlink_status_regression -v
+```
+
+也可以被现有发现方式统一收集：
+
+```sh
+python -m unittest discover -s tests -v
+```
+
+或直接运行测试文件：
+
+```sh
+python tests/test_export_symlink_status_regression.py
+```
+
+### 测试方式
+
+- 从 README 公开的 `python -m asset_catalog` 入口以**独立子进程**方式调用
+  （`add` 仅用于准备样例数据，测试对象为 `export --check-files` 对登记路径
+  后来变为符号链接时的判定）。
+- 每组用例使用 `tempfile` 创建**独立的临时样例文件与 SQLite 数据库**，
+  结束后自动清理，不接触、不修改已有目录或真实素材，不访问网络，
+  不依赖第三方库（仅用 Python 3 标准库）。
+- 通过 `json.loads` 比较解析后的内容，不依赖 JSON 空白或对象键顺序。
+- 环境确实不支持创建符号链接时，仅 `skipTest` 跳过相关用例并在跳过原因中
+  说明；其他错误（如链接创建遇到非“不支持”类 OSError、任一导出预期不符）
+  均使测试失败，不把跳过记为行为验证通过。
+
+### 固定样例与覆盖内容
+
+两组独立样例均按 A、B 顺序登记：A 类型 `image`，标签依次为 `demo`、`ui`；
+B 类型 `audio`，标签只有 `music`。
+
+第一组把 A 的原登记路径删除后替换为一个符号链接，链接指向**未登记的普通
+文件 T**（T 在创建链接之后才写入）：
+
+1. 链接有效时执行 `export --check-files`：按 A、B 的首次登记顺序各输出一次，
+   两者状态均为 `present`；A 的 `path`、`type`、`tags` 保持登记值，
+   输出路径仍是原登记路径而非 T 的路径，T 不成为目录记录。
+2. 删除 T 形成**断链**后再次导出：A 报告 `missing`，B 仍为 `present`，
+   两条记录均保留（断链被成功报告为 missing，不报错、不丢记录）。
+3. 在 T 的原目标位置按原内容重建 T（不重新登记）后，由**新启动的导出进程**
+   重新报告 A 为 `present`，B 仍为 `present`，元数据与顺序不变。
+4. 上述每一种状态（有效链接、断链、重建后）下，不带 `--check-files` 的
+   `export` 都仍返回 A、B 两条原元数据记录，且不含 `file_status` 字段。
+
+第二组用独立样例把 A 的原登记路径替换为指向一个**临时目录**的符号链接：
+
+5. `export --check-files` 按链接目标（目录）把 A 判为 `not_file`，
+   B 仍为 `present`；结果顺序与每条记录的 path/type/tags 不变；
+   不带选项的导出同样保持两条原元数据记录。
+
+通用约定与只读核对：
+
+6. 上述带选项导出均退出码 0、标准错误为空，标准输出只有**一行 JSON 数组**。
+7. 每次导出前后核对样例数据库字节、B 与仍存在的 T 的内容以及链接指向
+   （`readlink` 字符串）均不变；样例准备中主动删除或重建 T、删除 A 并
+   创建链接、创建目录等显式变更除外。导出不会重建被删除的 T，也不会改动
+   链接指向的目录内容。
+
+### 成功结果
+
+成功时输出 `OK`，4 个用例全部通过，例如：
+
+```
+test_broken_link_reports_missing_then_rebuilt_reports_present ... ok
+test_exports_readonly_database_b_and_target_bytes ... ok
+test_link_to_directory_reports_not_file ... ok
+test_link_to_unregistered_file_present_and_no_t_record ... ok
+
+----------------------------------------------------------------------
+Ran 4 tests in ...s
+
+OK
+```
+
+若环境不支持创建符号链接，相关用例显示 `skipped` 并给出原因（其余用例仍
+正常执行）；重复执行结论一致；任一上述行为不符时 unittest 以非零退出码
+退出，并指出具体场景与差异（退出码、标准错误、输出行数、状态、顺序、
+元数据、数据库字节、B/T 内容或链接指向）。
